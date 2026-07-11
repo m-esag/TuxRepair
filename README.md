@@ -26,7 +26,7 @@
 </p>
 
 ---
-
+**DISCLAIMER** THIS PROJECT WAS STARTED USING THE HELP OF LLM CODING ASSISTANCE GEMINI IN THIS CASE BUGS ARE EXPECTED
 **TuxRepair** is a high-density, high-efficiency automotive shop management system built for independent repair shops. It provides a complete service counter workflow — from vehicle intake and work order creation to parts/labor billing, double-entry accounting, and PDF print output — all in a single offline-first desktop application.
 
 No cloud subscriptions. No vendor lock-in. Your data stays on your machine in a standard SQLite database.
