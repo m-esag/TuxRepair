@@ -1,0 +1,96 @@
+# ==========================
+# TuxRepair .gitignore
+# ==========================
+
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+tuxrepair-ui
+
+# ==========================
+# CMake
+# ==========================
+/build/
+build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+cmake_install.cmake
+CMakeUserPresets.json
+
+# Compilation databases
+compile_commands.json
+
+# ==========================
+# Local Data (never commit)
+# ==========================
+# SQLite databases and journals
+/*.db
+/*.db-journal
+/*.db-wal
+/*.db-shm
+
+# Generated PDF outputs
+/*.pdf
+
+# ==========================
+# Large data files
+# ==========================
+Year-Make-Model-Trim-Full-Specs-by-Teoalida-SAMPLE.sql
+import_car_db.py
+
+# ==========================
+# IDE / Editor / AI configs
+# ==========================
+.vscode/
+.idea/
+.cache/
+.agents/
+.gemini/
+.project
+.cproject
+.settings/
+*.launch
+*.sublime-project
+*.sublime-workspace
+*.kate-swp
+*.kdev4
+*.kdev_include_paths
+*~
+
+# ==========================
+# OS files
+# ==========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ==========================
+# Backups
+# ==========================
+/backups/
