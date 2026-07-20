@@ -109,7 +109,7 @@ sudo pacman -S cmake qt6-base sqlite
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/YOUR_USERNAME/TuxRepair.git
+git clone https://github.com/m-esag/TuxRepair.git
 cd TuxRepair
 
 # 2. Configure
