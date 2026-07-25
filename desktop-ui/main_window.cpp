@@ -558,7 +558,7 @@ void MainWindow::setupTicketsTab() {
 
   auto shortcut_f9 = new QShortcut(QKeySequence(Qt::Key_F9), this);
   connect(shortcut_f9, &QShortcut::activated, this, [this]() {
-    InvoiceLookupDialog dlg(false, m_db, this);
+    WipDashboardDialog dlg(m_db, this);
     if (dlg.exec() == QDialog::Accepted && dlg.selectedInvoiceId() != -1) {
       loadInvoiceDetails(dlg.selectedInvoiceId());
     }
@@ -2391,225 +2391,83 @@ void MainWindow::setupMenuBar() {
   auto act_save_inv = m_file->addAction("&Save Invoice");
   act_save_inv->setShortcut(QKeySequence("Ctrl+S"));
   m_file->addSeparator();
-  auto act_jobs_wip = m_file->addAction("&Jobs In Progress");
-  auto act_bay_sched = m_file->addAction("&Bay Schedule");
-  m_file->addSeparator();
-  auto act_cust_files = m_file->addAction("Customer &Files");
-  auto act_vendor_files = m_file->addAction("Vendor &Files");
-  auto act_inv_files = m_file->addAction("Inventory &Files");
-  auto act_tech_files = m_file->addAction("Technician &Files");
-  m_file->addSeparator();
-  auto act_print = m_file->addAction("&Print");
-  auto act_printer_setup = m_file->addAction("Printer &Setup");
-  m_file->addSeparator();
-  auto act_backup = m_file->addAction("Make &Backup Files");
+  auto act_backup = m_file->addAction("Make &Backup Database");
   m_file->addSeparator();
   auto act_exit = m_file->addAction("E&xit");
 
   // 2. Edit
   auto m_edit = bar->addMenu("&Edit");
-  auto act_notepad = m_edit->addAction("&Note Pad");
-  auto act_lock_sec = m_edit->addAction("&Lock Security");
-  m_edit->addSeparator();
-  auto act_edit_inv = m_edit->addAction("&Edit Invoice");
+  auto act_edit_inv = m_edit->addAction("&Edit Current Invoice");
   auto act_erase_inv = m_edit->addAction("Erase / &Void Invoice");
   m_edit->addSeparator();
-  auto act_calc = m_edit->addAction("&Calculator");
-  auto act_payout = m_edit->addAction("Cash Drawer &Pay Out");
-  auto act_colors = m_edit->addAction("Set Screen &Colors");
+  auto act_colors = m_edit->addAction("Toggle Light / &Dark Theme");
 
   // 3. Customers
   auto m_cust = bar->addMenu("&Customers");
-  auto act_cust_main = m_cust->addAction("Customer &Main Files");
-  auto act_phone_book = m_cust->addAction("&Phone Book");
-  auto act_acct_hist = m_cust->addAction("&Account History");
+  auto act_cust_main = m_cust->addAction("Customer &Directory (F2)");
+  auto act_phone_book = m_cust->addAction("&Phone Directory");
   auto act_service_hist = m_cust->addAction("Service &Histories");
   m_cust->addSeparator();
   auto act_quotes = m_cust->addAction("&Quotes & Estimates");
   auto act_unpaid = m_cust->addAction("&Unpaid Invoices");
 
-  // 4. Suppliers
-  auto m_supp = bar->addMenu("&Suppliers");
-  auto act_supp_main = m_supp->addAction("Supplier &Main Files");
-  auto act_supp_phone = m_supp->addAction("&Phone Book");
-  auto act_quick_payables = m_supp->addAction("&Quick Payables");
-  m_supp->addSeparator();
-  auto act_create_po = m_supp->addAction("Create New &Purchase Order");
-  auto act_review_po = m_supp->addAction("Review Closed &Purchase Orders");
-
-  // 5. Reports
-  auto m_rep = bar->addMenu("&Reports");
-  auto act_daily_sales = m_rep->addAction("Daily &Sales & Tax Summary");
-  auto act_referrals = m_rep->addAction("Refe&rrals");
-  auto act_sales_cat = m_rep->addAction("Sales &Categories Report");
-  auto act_unpaid_rep = m_rep->addAction("&Unpaid Invoices");
-  m_rep->addSeparator();
-  auto act_postcards = m_rep->addAction("&Post Cards");
-  auto act_aging = m_rep->addAction("&Aging Report");
-  auto act_tech_eff = m_rep->addAction("Technician &Commissions & Efficiency");
-  auto act_export_qb = m_rep->addAction("Export Invoices to &QuickBooks");
-  auto act_common_veh = m_rep->addAction("Most Common &Vehicles Serviced");
-  m_rep->addSeparator();
-  auto act_fleet_rep = m_rep->addAction("&Fleet Accounts Report");
-  auto act_warranty_rep = m_rep->addAction("&Warranty Report");
-  auto act_best_cust = m_rep->addAction("&Best Cities & Customers");
-  auto act_master_builder = m_rep->addAction("&Master Report Builder");
-  m_rep->addSeparator();
-  auto act_changed_inv = m_rep->addAction("&Changed Invoices Report");
-  auto act_audit_inv_num = m_rep->addAction("Audit &Invoice Number Usage");
-  auto act_inspection_rep = m_rep->addAction("State &Inspection Report (PA)");
-  auto act_plate_utils = m_rep->addAction("&License Plate Utilities");
-  auto act_diag_upload = m_rep->addAction("Upload Advanced &Diagnostics");
-  auto act_ledger_view = m_rep->addAction("Double-Entry &Ledger View");
-
-  // 6. Inventory
+  // 4. Inventory
   auto m_inv = bar->addMenu("&Inventory");
   auto act_manage_i = m_inv->addAction("Inventory &Main Files");
-  auto act_reorder_rep = m_inv->addAction("&Reorder Report");
-  auto act_reset_tax_status = m_inv->addAction("&Reset Parts & Labor Tax Status");
-  auto act_lookup_cat = m_inv->addAction("Parts & Labor &Pop-Up (Ctrl+F5)");
-  auto act_detailed_sales_rep = m_inv->addAction("&Detailed Sales Report");
+  auto act_lookup_cat = m_inv->addAction("Parts & Labor &Catalog (F3)");
   m_inv->addSeparator();
-  auto act_missing_inv = m_inv->addAction("Check For &Missing Inventory Items");
-  auto act_rebuild_inv = m_inv->addAction("Rebuild Inventory From Invoice Records");
-  auto act_inv_valuation = m_inv->addAction("Inventory &Value Report");
-  auto act_import_inv = m_inv->addAction("&Import Inventory From File");
+  auto act_rebuild_inv = m_inv->addAction("Rebuild Inventory Sync");
+  auto act_inv_valuation = m_inv->addAction("Inventory &Valuation Report");
 
-  // 7. Setup
+  // 5. Setup
   auto m_setup = bar->addMenu("&Setup");
-  auto act_shop_info = m_setup->addAction("Your &Shop Business Information");
+  auto act_shop_info = m_setup->addAction("Your &Shop Business Info");
   auto act_job_kits = m_setup->addAction("&Parts and Catalog Setup");
-  auto act_printer_invoices = m_setup->addAction("&Printers & Invoices");
-  auto act_security_setup = m_setup->addAction("&Security");
-  auto act_writers_setup = m_setup->addAction("Service &Writers");
-  auto act_techs_setup = m_setup->addAction("&Technicians");
-  auto act_veh_files = m_setup->addAction("&Vehicle Files");
-  auto act_profit_watch = m_setup->addAction("Profit &Watch");
-  auto act_spell_check = m_setup->addAction("Spell &Check");
-  m_setup->addSeparator();
-  auto act_logged_users = m_setup->addAction("Current Users &Logged On");
-  auto act_caller_id = m_setup->addAction("Telephone &Caller ID");
-  auto act_buttons_colors = m_setup->addAction("Screen &Buttons & Colors");
-  auto act_registration = m_setup->addAction("&Registration");
-  auto act_update_sub = m_setup->addAction("Update &Subscription Services");
-  auto act_refresh_reg = m_setup->addAction("Refresh Registration &Sequence");
-  auto act_firewall = m_setup->addAction("Fire&Wall Settings");
-  m_setup->addSeparator();
   auto act_tax_setup = m_setup->addAction("&Tax Settings");
   auto act_print_templates = m_setup->addAction("&Print Templates Settings");
-  auto act_toggle_theme = m_setup->addAction("Toggle &Light/Dark Theme");
 
-  // 8. Print
-  auto m_print = bar->addMenu("&Print");
-  auto act_print_traveler = m_print->addAction("&Invoice / Traveler (PDF)");
-  act_print_traveler->setShortcut(QKeySequence("Ctrl+P"));
-  auto act_job_ticket = m_print->addAction("&Job Ticket");
-  auto act_rev_history = m_print->addAction("Estimate &Revisions History");
-  auto act_print_sticker = m_print->addAction("&Oil Change Reminder Sticker");
-  auto act_alt_sticker = m_print->addAction("&Alternate Reminder Sticker");
-  auto act_wip_print = m_print->addAction("&WIP (F9)");
+  // 6. Reports & Accounting
+  auto m_rep = bar->addMenu("&Reports & Accounting");
+  auto act_daily_sales = m_rep->addAction("Daily &Sales & Tax Summary");
+  auto act_ledger_view = m_rep->addAction("Double-Entry &Ledger View");
+  auto act_tech_eff = m_rep->addAction("Technician &Commissions & Efficiency");
+  auto act_export_qb = m_rep->addAction("Export Invoices to &QuickBooks (CSV)");
 
-  // 9. CheckBook
-  auto m_check = bar->addMenu("Check&Book");
-  auto act_check_ledger = m_check->addAction("&CheckBook Ledger");
-
-  // 10. Help
+  // 7. Help
   auto m_help = bar->addMenu("&Help");
-  auto act_help_contents = m_help->addAction("&Help");
-  auto act_about = m_help->addAction("&About");
-  auto act_internet_update = m_help->addAction("&Internet Program Update");
+  auto act_help_contents = m_help->addAction("&Help & Keyboard Shortcuts");
+  auto act_about = m_help->addAction("&About TuxRepair");
+  auto act_internet_update = m_help->addAction("&Check For Updates");
 
-  // 11. Service Reminders
-  auto m_rem = bar->addMenu("Service &Reminders");
-  auto act_email_reminders = m_rem->addAction("&Email Service Reminders");
-  auto act_driverside = m_rem->addAction("&DriverSide");
-
-  // Connect them to their corresponding slot actions
+  // Wire File Actions
   connect(act_start_new, &QAction::triggered, this, [this]() {
     m_tab_widget->setCurrentIndex(0);
     m_intake_lookup_edit->setFocus();
   });
-  connect(act_save_inv, &QAction::triggered, this,
-          &MainWindow::onSaveInvoiceChanges);
+  connect(act_save_inv, &QAction::triggered, this, &MainWindow::onSaveInvoiceChanges);
   connect(act_backup, &QAction::triggered, this, [this]() {
     QDir().mkdir("backups");
-    QString backup_path =
-        QString("backups/tuxrepair_backup_%1.db")
-            .arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+    QString backup_path = QString("backups/tuxrepair_backup_%1.db").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
     if (QFile::copy("tuxrepair.db", backup_path)) {
-      QMessageBox::information(
-          this, "Backup Success",
-          QString("Database successfully backed up to:\n%1").arg(backup_path));
+      QMessageBox::information(this, "Backup Success", QString("Database successfully backed up to:\n%1").arg(backup_path));
     } else {
-      QMessageBox::warning(this, "Backup Failed",
-                           "Could not copy active database file. Ensure the "
-                           "database file exists and isn't locked.");
+      QMessageBox::warning(this, "Backup Failed", "Could not copy active database file.");
     }
   });
   connect(act_exit, &QAction::triggered, this, &QMainWindow::close);
 
-  // Setup menu connections
-  connect(act_tax_setup, &QAction::triggered, this, [this]() {
-    bool ok = false;
-    double new_rate = QInputDialog::getDouble(
-        this, "Parts Sales Tax Settings",
-        "Enter parts sales tax rate (%):", m_sales_tax_rate * 100.0, 0.0, 100.0,
-        2, &ok);
-    if (ok) {
-      m_sales_tax_rate = new_rate / 100.0;
-      m_db->setSetting("sales_tax_rate", std::to_string(m_sales_tax_rate));
-      recalculateTicketTotals();
-      QMessageBox::information(
-          this, "Tax Config Updated",
-          QString("Parts sales tax rate updated to %1%").arg(new_rate));
-    }
+  // Wire Edit Actions
+  connect(act_edit_inv, &QAction::triggered, this, [this]() {
+    m_tab_widget->setCurrentIndex(0);
+    m_t_cust_first_edit->setFocus();
   });
-  connect(act_print_templates, &QAction::triggered, this, [this]() {
-    TemplateEditorDialog dlg(m_db, this);
-    dlg.exec();
-  });
-  connect(act_toggle_theme, &QAction::triggered, this, [this]() {
+  connect(act_erase_inv, &QAction::triggered, this, &MainWindow::onVoidReopenRO);
+  connect(act_colors, &QAction::triggered, this, [this]() {
     m_dark_theme = !m_dark_theme;
     applyTheme();
   });
 
-  // Shortcuts (Ctrl+F / F2 / Ctrl+N / F5 / F9 / F12)
-  auto shortcut_focus_search = new QShortcut(QKeySequence("Ctrl+F"), this);
-  connect(shortcut_focus_search, &QShortcut::activated, this, [this]() {
-    m_tab_widget->setCurrentIndex(0);
-    m_intake_lookup_edit->setFocus();
-  });
-
-  auto shortcut_f2 = new QShortcut(QKeySequence("F2"), this);
-  connect(shortcut_f2, &QShortcut::activated, this, [this]() {
-    m_tab_widget->setCurrentIndex(0);
-    m_intake_lookup_edit->setFocus();
-  });
-
-  auto shortcut_ctrl_n = new QShortcut(QKeySequence("Ctrl+N"), this);
-  connect(shortcut_ctrl_n, &QShortcut::activated, this, [this]() {
-    clearActiveInvoiceView();
-    m_t_cust_first_edit->setFocus();
-  });
-
-  auto shortcut_f5 = new QShortcut(QKeySequence("F5"), this);
-  connect(shortcut_f5, &QShortcut::activated, this, [this]() {
-    onPrintTraveler();
-  });
-
-  auto shortcut_f9 = new QShortcut(QKeySequence("F9"), this);
-  connect(shortcut_f9, &QShortcut::activated, this, [this]() {
-    onFinalizeInvoice();
-  });
-
-  auto shortcut_done = new QShortcut(QKeySequence("F12"), this);
-  connect(shortcut_done, &QShortcut::activated, this, [this]() {
-    if (m_tab_widget->currentIndex() == 0) {
-      m_finalize_ticket_btn->showMenu();
-    }
-  });
-
-  // Setup menu connections
+  // Wire Customers Actions
   connect(act_cust_main, &QAction::triggered, this, [this]() {
     CustomerLookupDialog dlg(m_db, this);
     if (dlg.exec() == QDialog::Accepted && dlg.hasSelection()) {
@@ -2626,9 +2484,7 @@ void MainWindow::setupMenuBar() {
       if (active_inv_id != -1) {
         loadInvoiceDetails(active_inv_id);
       } else {
-        int inv_id = m_db->createInvoice(
-            customer_id, vehicle_id, "Estimate", 0,
-            QDateTime::currentDateTime().toString("yyyy-MM-dd").toStdString());
+        int inv_id = m_db->createInvoice(customer_id, vehicle_id, "Estimate", 0, QDateTime::currentDateTime().toString("yyyy-MM-dd").toStdString());
         if (inv_id != -1) {
           refreshInvoicesList();
           loadInvoiceDetails(inv_id);
@@ -2636,17 +2492,11 @@ void MainWindow::setupMenuBar() {
       }
     }
   });
-
   connect(act_phone_book, &QAction::triggered, this, [this]() {
     CustomerLookupDialog dlg(m_db, this);
     dlg.setInitialSearchField("Phone");
     dlg.exec();
   });
-
-  connect(act_acct_hist, &QAction::triggered, this, [this]() {
-    m_tab_widget->setCurrentIndex(3);
-  });
-
   connect(act_service_hist, &QAction::triggered, this, [this]() {
     InvoiceLookupDialog dlg(false, m_db, this);
     if (dlg.exec() == QDialog::Accepted && dlg.selectedInvoiceId() != -1) {
@@ -2654,7 +2504,6 @@ void MainWindow::setupMenuBar() {
       loadInvoiceDetails(dlg.selectedInvoiceId());
     }
   });
-
   connect(act_quotes, &QAction::triggered, this, [this]() {
     InvoiceLookupDialog dlg(true, m_db, this);
     if (dlg.exec() == QDialog::Accepted && dlg.selectedInvoiceId() != -1) {
@@ -2662,169 +2511,21 @@ void MainWindow::setupMenuBar() {
       loadInvoiceDetails(dlg.selectedInvoiceId());
     }
   });
-
   connect(act_unpaid, &QAction::triggered, this, [this]() {
     InvoiceLookupDialog dlg(false, m_db, this);
     dlg.exec();
   });
 
-  connect(act_supp_main, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Suppliers Manager",
-                             "Suppliers registry is fully managed via Accounts "
-                             "Payable subledger in the Accounting Ledger tab.");
-  });
-
-  connect(act_supp_phone, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Supplier Phone Book",
-                             "Preferred Vendors Contact Directory:\n\n"
-                             "• NAPA Auto Parts: (541) 555-0199\n"
-                             "• O'Reilly Commercial Line: (541) 555-0244\n"
-                             "• AutoZone Commercial: (503) 555-0811\n"
-                             "• Worldpac European Direct: (503) 555-0922");
-  });
-
-  connect(act_quick_payables, &QAction::triggered, this, [this]() {
-    m_tab_widget->setCurrentIndex(3);
-  });
-
-  connect(act_create_po, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Purchase Order Generator",
-                             "Purchase Order #PO-2026-004 created for NAPA Auto Parts. Tracked in Ledger.");
-  });
-
-  connect(act_review_po, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Closed Purchase Orders",
-                             "Historical Purchase Orders Logged:\n• PO-2026-001 (NAPA) - Closed\n• PO-2026-002 (O'Reilly) - Closed\n• PO-2026-003 (Worldpac) - Closed");
-  });
-
-  connect(act_daily_sales, &QAction::triggered, this,
-          [this]() { m_tab_widget->setCurrentIndex(3); });
-  connect(act_referrals, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Customer Referrals", "Customer Referral Tracking:\n• Direct Word of Mouth: 62%\n• Google Search: 24%\n• Fleet Contracts: 14%");
-  });
-
-  connect(act_sales_cat, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Sales Categories Report", "YTD Sales Category Summary:\n• Parts Retail: $42,850.00\n• Labor Service: $68,400.00\n• Sublet & Machine Shop: $5,200.00");
-  });
-
-  connect(act_unpaid_rep, &QAction::triggered, this, [this]() {
-    InvoiceLookupDialog dlg(false, m_db, this);
-    dlg.exec();
-  });
-
-  connect(act_aging, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Accounts Receivable Aging", "A/R Aging Summary:\n• 0-30 Days: $1,250.00\n• 31-60 Days: $340.00\n• 61-90 Days: $0.00\n• 90+ Days: $0.00");
-  });
-
-  connect(act_postcards, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Postcards & Mailers", "Generated 45 maintenance reminder post cards for 6-month inspection schedules.");
-  });
-
-  connect(act_tech_eff, &QAction::triggered, this, [this]() {
-    auto invoices = m_db->getAllInvoices();
-    std::map<std::string, std::pair<double, double>> tech_stats;
-    for (const auto &inv : invoices) {
-      if (inv.status != "Closed")
-        continue;
-      for (const auto &item : inv.items) {
-        QString itype = QString::fromStdString(item.item_type).trimmed().toLower();
-        if (itype != "labor")
-          continue;
-        QString tech = QString::fromStdString(item.tech_assigned).trimmed();
-        if (tech.isEmpty()) tech = "Office";
-        double billed = item.quantity * (item.unit_price / 100.0);
-        tech_stats[tech.toStdString()].first += item.quantity;
-        tech_stats[tech.toStdString()].second += billed;
-      }
-    }
-    QString report = "Technician Efficiency & Billed Hours Report:\n\n";
-    for (const auto &[tech, stats] : tech_stats) {
-      report += QString("• %1: %2 hrs billed | $%3 labor revenue\n")
-                    .arg(QString::fromStdString(tech))
-                    .arg(QString::number(stats.first, 'f', 1))
-                    .arg(QString::number(stats.second, 'f', 2));
-    }
-    if (tech_stats.empty()) report += "No billed labor recorded yet.";
-    QMessageBox::information(this, "Technician Efficiency", report);
-  });
-
-  connect(act_export_qb, &QAction::triggered, this, &MainWindow::onExportLedgerToCSV);
-
-  connect(act_common_veh, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Most Common Vehicles Serviced", "Top Serviced Vehicles:\n1. Ford F-150 / Super Duty (28%)\n2. Toyota Camry / RAV4 (22%)\n3. Honda Accord / Civic (18%)\n4. Chevrolet Tahoe / Silverado (14%)");
-  });
-
-  connect(act_fleet_rep, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Fleet Accounts Report", "Active Commercial Fleet Accounts:\n• City Courier Express (4 Vehicles)\n• Cascade Utility Services (8 Vehicles)");
-  });
-
-  connect(act_warranty_rep, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Warranty Report", "Active 12-Month / 12,000-Mile Parts & Labor Warranty Claims: 0 active claims.");
-  });
-
-  connect(act_best_cust, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Best Customers & Cities", "Top Service Cities:\n1. Eugene, OR ($54,200)\n2. Portland, OR ($38,900)\n3. Springfield, OR ($18,400)");
-  });
-
-  connect(act_master_builder, &QAction::triggered, this, [this]() {
-    m_tab_widget->setCurrentIndex(3);
-  });
-
-  connect(act_changed_inv, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Changed Invoices Audit Log", "Invoice Modification Audit Log: All line item and header revisions recorded cleanly in DB status history.");
-  });
-
-  connect(act_audit_inv_num, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Invoice Number Usage Audit", "Invoice Number Integrity Check: Sequences #1 through #15 continuous without missing numbers or gaps.");
-  });
-
-  connect(act_inspection_rep, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "State Safety & Emissions Inspection", "State Emissions & Safety Inspection Module: 100% compliant.");
-  });
-
-  connect(act_plate_utils, &QAction::triggered, this, [this]() {
-    CustomerLookupDialog dlg(m_db, this);
-    dlg.setInitialSearchField("License");
-    dlg.exec();
-  });
-
-  connect(act_diag_upload, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "OBD-II / CAN Bus Diagnostics Upload", "Diagnostic Report Uploader: Connected to J2534 Passthru device.");
-  });
-
-  connect(act_ledger_view, &QAction::triggered, this,
-          [this]() { m_tab_widget->setCurrentIndex(3); });
-
-  connect(act_manage_i, &QAction::triggered, this, [this]() {
-    m_tab_widget->setCurrentIndex(2);
-  });
-
-  connect(act_reorder_rep, &QAction::triggered, this, [this]() {
-    m_tab_widget->setCurrentIndex(2);
-  });
-
-  connect(act_reset_tax_status, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Tax Status Reset", "Parts & Labor tax status verified. Parts set to taxable by default.");
-  });
-
+  // Wire Inventory Actions
+  connect(act_manage_i, &QAction::triggered, this, [this]() { m_tab_widget->setCurrentIndex(2); });
   connect(act_lookup_cat, &QAction::triggered, this, [this]() {
     CatalogLookupDialog dlg(m_db, this);
     dlg.exec();
   });
-
-  connect(act_detailed_sales_rep, &QAction::triggered, this, [this]() {
-    m_tab_widget->setCurrentIndex(3);
-  });
-
-  connect(act_missing_inv, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Inventory Audit", "Scanned catalog items: 0 missing or orphaned stock SKUs detected.");
-  });
-
   connect(act_rebuild_inv, &QAction::triggered, this, [this]() {
     refreshInventoryData();
     QMessageBox::information(this, "Inventory Rebuilt", "Inventory counts synchronized with invoice line items.");
   });
-
   connect(act_inv_valuation, &QAction::triggered, this, [this]() {
     auto stock = m_db->getInventory();
     double wholesale_tot = 0, retail_tot = 0;
@@ -2838,112 +2539,54 @@ void MainWindow::setupMenuBar() {
                                  .arg(QString::number(retail_tot, 'f', 2)));
   });
 
-  connect(act_import_inv, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Import Inventory", "CSV Inventory Importer: Select file to bulk import SKUs and prices.");
-  });
-
+  // Wire Setup Actions
   connect(act_shop_info, &QAction::triggered, this, [this]() {
-    QMessageBox::information(
-        this, "Shop Information",
-        "TuxRepair Open-Source Garage Management Suite\nSovereign Automotive "
-        "Repair Shop Platform.");
+    QMessageBox::information(this, "Shop Information", "TuxRepair Open-Source Garage Management Suite\nSovereign Automotive Repair Shop Platform.");
   });
-  connect(act_job_kits, &QAction::triggered, this,
-          [this]() { onInsertJobKit(); });
-
-  connect(act_printer_invoices, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Printer & Invoice Setup", "Default Printer: Thermal Slip Printer (Port /dev/usb/lp0). Formats: Standard 8.5x11 PDF Traveler & Slip Receipt.");
-  });
-
-  connect(act_security_setup, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Security & Roles", "Active User: Admin (Full Rights). Access control enabled.");
-  });
-
-  connect(act_writers_setup, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Service Writers", "Active Service Writers:\n1. Office / Front Desk\n2. Service Manager");
-  });
-
-  connect(act_techs_setup, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Technician Staff", "Registered Shop Technicians:\n• Bob (Master Tech)\n• Jane (Lube & Tire Tech)\n• Al (Electrical Tech)");
-  });
-
-  connect(act_veh_files, &QAction::triggered, this, [this]() {
-    CustomerLookupDialog dlg(m_db, this);
-    dlg.exec();
-  });
-
-  connect(act_profit_watch, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Profit Watch", "Current Gross Profit Margin:\n• Parts Margin: 58.2%\n• Labor Margin: 84.5%\n• Overall Shop Margin: 71.3%");
-  });
-
-  connect(act_spell_check, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Spell Check", "Spell check active for work order notes.");
-  });
-
-  connect(act_logged_users, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Active Users", "Current Users Logged On:\n• Admin (Station 1)");
-  });
-
-  connect(act_caller_id, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Telephone Caller ID", "Caller ID Passthrough: Online (Monitoring incoming lines).");
-  });
-
-  connect(act_buttons_colors, &QAction::triggered, this, [this]() {
-    m_dark_theme = !m_dark_theme;
-    applyTheme();
-  });
-
-  connect(act_registration, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Registration", "TuxRepair Enterprise License: Fully Registered & Activated.");
-  });
-
-  connect(act_update_sub, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Subscription Services", "Catalog & VIN Decoding Subscription: Active (Updated 2026).");
-  });
-
-  connect(act_refresh_reg, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Registration Refresh", "Registration sequence refreshed.");
-  });
-
-  connect(act_firewall, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Firewall Settings", "Network Isolation & Firewall: Localhost offline-first mode active.");
-  });
-
-  connect(act_print_traveler, &QAction::triggered, this,
-          &MainWindow::onPrintTraveler);
-
-  connect(act_job_ticket, &QAction::triggered, this, &MainWindow::onPrintTraveler);
-
-  connect(act_rev_history, &QAction::triggered, this, [this]() {
-    if (m_active_invoice_id == -1) return;
-    auto history = m_db->getStatusHistory(m_active_invoice_id);
-    QString msg = QString("Estimate Revision History for RO #%1:\n\n").arg(m_active_invoice_id);
-    for (const auto& h : history) {
-      msg += QString("• [%1] Status changed to '%2' by %3\n").arg(QString::fromStdString(h.timestamp)).arg(QString::fromStdString(h.status)).arg(QString::fromStdString(h.user_name));
+  connect(act_job_kits, &QAction::triggered, this, [this]() { onInsertJobKit(); });
+  connect(act_tax_setup, &QAction::triggered, this, [this]() {
+    bool ok = false;
+    double new_rate = QInputDialog::getDouble(this, "Parts Sales Tax Settings", "Enter parts sales tax rate (%):", m_sales_tax_rate * 100.0, 0.0, 100.0, 2, &ok);
+    if (ok) {
+      m_sales_tax_rate = new_rate / 100.0;
+      m_db->setSetting("sales_tax_rate", std::to_string(m_sales_tax_rate));
+      recalculateTicketTotals();
+      QMessageBox::information(this, "Tax Config Updated", QString("Parts sales tax rate updated to %1%").arg(new_rate));
     }
-    QMessageBox::information(this, "Revision History", msg);
   });
-
-  connect(act_print_sticker, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Windshield Stickers",
-                             "Sticker template printed successfully on "
-                             "connected thermal roll printer.");
-  });
-
-  connect(act_alt_sticker, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Alternate Reminder Sticker",
-                             "Alternate sticker format printed on thermal roll printer.");
-  });
-
-  connect(act_wip_print, &QAction::triggered, this, [this]() {
-    InvoiceLookupDialog dlg(false, m_db, this);
+  connect(act_print_templates, &QAction::triggered, this, [this]() {
+    CustomPdfSettingsDialog dlg(m_db, this);
     dlg.exec();
   });
 
-  connect(act_check_ledger, &QAction::triggered, this, [this]() {
-    m_tab_widget->setCurrentIndex(3);
+  // Wire Reports & Accounting Actions
+  connect(act_daily_sales, &QAction::triggered, this, [this]() { m_tab_widget->setCurrentIndex(3); });
+  connect(act_ledger_view, &QAction::triggered, this, [this]() { m_tab_widget->setCurrentIndex(3); });
+  connect(act_tech_eff, &QAction::triggered, this, [this]() {
+    auto invoices = m_db->getAllInvoices();
+    std::map<std::string, std::pair<double, double>> tech_stats;
+    for (const auto &inv : invoices) {
+      if (inv.status != "Closed") continue;
+      for (const auto &item : inv.items) {
+        QString itype = QString::fromStdString(item.item_type).trimmed().toLower();
+        if (itype != "labor") continue;
+        QString tech = QString::fromStdString(item.tech_assigned).trimmed();
+        if (tech.isEmpty()) tech = "Office";
+        double billed = item.quantity * (item.unit_price / 100.0);
+        tech_stats[tech.toStdString()].first += item.quantity;
+        tech_stats[tech.toStdString()].second += billed;
+      }
+    }
+    QString report = "Technician Efficiency & Billed Hours Report:\n\n";
+    for (const auto &[tech, stats] : tech_stats) {
+      report += QString("• %1: %2 hrs billed | $%3 labor revenue\n").arg(QString::fromStdString(tech)).arg(QString::number(stats.first, 'f', 1)).arg(QString::number(stats.second, 'f', 2));
+    }
+    if (tech_stats.empty()) report += "No billed labor recorded yet.";
+    QMessageBox::information(this, "Technician Efficiency", report);
   });
+  connect(act_export_qb, &QAction::triggered, this, &MainWindow::onExportLedgerToCSV);
 
+  // Wire Help Actions
   connect(act_help_contents, &QAction::triggered, this, [this]() {
     QMessageBox::information(this, "TuxRepair Help System",
                              "TuxRepair User Manual & Quick Reference:\n\n"
@@ -2954,27 +2597,12 @@ void MainWindow::setupMenuBar() {
                              "• F12: Process Payment & Finalize Invoice\n"
                              "• Column 1: Quick SKU / Code Search");
   });
-
+  connect(act_about, &QAction::triggered, this, [this]() {
+    QMessageBox::about(this, "About TuxRepair", "TuxRepair Suite v1.0.0\nOffline-first automotive repair & accounting system.\nLicensed under AGPLv3.");
+  });
   connect(act_internet_update, &QAction::triggered, this, [this]() {
     QMessageBox::information(this, "Software Update Check", "Checking for updates... You are running the latest version of TuxRepair (v1.0.0).");
   });
-
-  connect(act_email_reminders, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "Email Service Reminders",
-                             "Scanned customer database. 0 service reminders "
-                             "due for oil filter lube intervals today.");
-  });
-
-  connect(act_driverside, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, "DriverSide Integration", "DriverSide Telematics & Service Link: Active and sync enabled.");
-  });
-
-  connect(act_about, &QAction::triggered, this, [this]() {
-    QMessageBox::about(this, "About TuxRepair",
-                       "TuxRepair Suite v1.0.0\nOffline-first automotive "
-                       "repair & accounting system.\nLicensed under AGPLv3.");
-  });
-}
 }
 
 void MainWindow::applyTheme() {

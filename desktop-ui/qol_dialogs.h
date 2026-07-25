@@ -203,12 +203,52 @@ private:
     QLineEdit* m_last_name_edit;
     QLineEdit* m_phone_edit;
     QLineEdit* m_email_edit;
-
     QLineEdit* m_plate_edit;
     QLineEdit* m_year_edit;
     QLineEdit* m_model_edit;
     QLineEdit* m_engine_edit;
     QLineEdit* m_mileage_edit;
+};
+
+// --- Work-In-Progress (WIP) Live Dashboard Dialog ---
+class WipDashboardDialog : public QDialog {
+    Q_OBJECT
+public:
+    explicit WipDashboardDialog(std::shared_ptr<DBManager> db, QWidget* parent = nullptr);
+
+    int selectedInvoiceId() const { return m_selected_inv_id; }
+
+private slots:
+    void refreshDashboard();
+    void onOpenTicket();
+    void onChangeStatus(const QString& new_status);
+
+private:
+    std::shared_ptr<DBManager> m_db;
+    int m_selected_inv_id = -1;
+
+    QTableWidget* m_wip_table;
+    QLabel* m_cnt_new_lbl;
+    QLabel* m_cnt_in_progress_lbl;
+    QLabel* m_cnt_waiting_parts_lbl;
+    QLabel* m_cnt_ready_lbl;
+};
+
+// --- Custom PDF & Printing Settings Dialog ---
+class CustomPdfSettingsDialog : public QDialog {
+    Q_OBJECT
+public:
+    explicit CustomPdfSettingsDialog(std::shared_ptr<DBManager> db, QWidget* parent = nullptr);
+
+private slots:
+    void onSaveSettings();
+
+private:
+    std::shared_ptr<DBManager> m_db;
+
+    QLineEdit* m_header_text_edit;
+    QLineEdit* m_footer_disclaimer_edit;
+    QLineEdit* m_logo_path_edit;
 };
 
 } // namespace tuxrepair

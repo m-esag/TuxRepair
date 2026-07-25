@@ -9,6 +9,8 @@
 #include <QMouseEvent>
 #include <QImage>
 #include <QBuffer>
+#include <QFileDialog>
+#include <QDir>
 
 namespace tuxrepair {
 
@@ -924,6 +926,207 @@ void NewIntakeWizardDialog::onCompleteIntake() {
         return;
     }
 
+    accept();
+}
+
+// ==========================================
+// WORK-IN-PROGRESS (WIP) LIVE DASHBOARD
+// ==========================================
+WipDashboardDialog::WipDashboardDialog(std::shared_ptr<DBManager> db, QWidget* parent)
+    : QDialog(parent), m_db(db) {
+    setWindowTitle("Work In Progress (WIP) Live Dashboard - F9");
+    resize(780, 520);
+
+    auto layout = new QVBoxLayout(this);
+
+    // Live Metrics Header Cards
+    auto cards_layout = new QHBoxLayout();
+    
+    auto create_card = [](const QString& title, const QString& bg_color) -> std::pair<QWidget*, QLabel*> {
+        auto card = new QFrame();
+        card->setStyleSheet(QString("QFrame { background-color: %1; border-radius: 6px; padding: 6px; }").arg(bg_color));
+        auto lay = new QVBoxLayout(card);
+        auto t_lbl = new QLabel(title);
+        t_lbl->setStyleSheet("font-weight: bold; color: #333333; font-size: 11px;");
+        auto v_lbl = new QLabel("0");
+        v_lbl->setStyleSheet("font-weight: bold; color: #111111; font-size: 20px;");
+        lay->addWidget(t_lbl);
+        lay->addWidget(v_lbl);
+        return {card, v_lbl};
+    };
+
+    auto [c1, l1] = create_card("NEW / INTAKE", "#e3f2fd");
+    auto [c2, l2] = create_card("IN SHOP / WORKING", "#fff9c4");
+    auto [c3, l3] = create_card("WAITING ON PARTS", "#ffe0b2");
+    auto [c4, l4] = create_card("READY FOR PICKUP", "#c8e6c9");
+
+    m_cnt_new_lbl = l1;
+    m_cnt_in_progress_lbl = l2;
+    m_cnt_waiting_parts_lbl = l3;
+    m_cnt_ready_lbl = l4;
+
+    cards_layout->addWidget(c1);
+    cards_layout->addWidget(c2);
+    cards_layout->addWidget(c3);
+    cards_layout->addWidget(c4);
+    layout->addLayout(cards_layout);
+
+    // Active Tickets Grid
+    m_wip_table = new QTableWidget(this);
+    m_wip_table->setColumnCount(6);
+    m_wip_table->setHorizontalHeaderLabels({"RO #", "Customer", "Vehicle", "Writer / Tech", "Total", "Current Status"});
+    m_wip_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    m_wip_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_wip_table->setSelectionMode(QAbstractItemView::SingleSelection);
+    layout->addWidget(m_wip_table);
+
+    // Quick Actions Layout
+    auto act_layout = new QHBoxLayout();
+    auto status_combo = new QComboBox(this);
+    status_combo->addItems({"New", "In Progress", "Waiting on Parts", "Ready", "Closed"});
+    auto set_status_btn = new QPushButton("Update Selected Status", this);
+    set_status_btn->setStyleSheet("background-color: #0288d1; color: white; font-weight: bold; padding: 5px;");
+    auto open_ro_btn = new QPushButton("Open Selected Work Order", this);
+    open_ro_btn->setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; padding: 5px;");
+
+    act_layout->addWidget(new QLabel("Quick Status Change:"));
+    act_layout->addWidget(status_combo);
+    act_layout->addWidget(set_status_btn);
+    act_layout->addStretch();
+    act_layout->addWidget(open_ro_btn);
+    layout->addLayout(act_layout);
+
+    connect(set_status_btn, &QPushButton::clicked, this, [this, status_combo]() {
+        onChangeStatus(status_combo->currentText());
+    });
+    connect(open_ro_btn, &QPushButton::clicked, this, &WipDashboardDialog::onOpenTicket);
+    connect(m_wip_table, &QTableWidget::cellDoubleClicked, this, [this](int, int) { onOpenTicket(); });
+
+    refreshDashboard();
+}
+
+void WipDashboardDialog::refreshDashboard() {
+    auto invoices = m_db->getAllInvoices();
+    m_wip_table->setRowCount(0);
+
+    int c_new = 0, c_prog = 0, c_parts = 0, c_ready = 0;
+
+    for (const auto& inv : invoices) {
+        if (inv.status == "Closed" || inv.status == "Voided") continue;
+
+        if (inv.status == "New" || inv.status.empty()) c_new++;
+        else if (inv.status == "In Progress") c_prog++;
+        else if (inv.status == "Waiting on Parts") c_parts++;
+        else if (inv.status == "Ready") c_ready++;
+
+        int r = m_wip_table->rowCount();
+        m_wip_table->insertRow(r);
+
+        m_wip_table->setItem(r, 0, new QTableWidgetItem(QString::number(inv.id)));
+        m_wip_table->setItem(r, 1, new QTableWidgetItem(QString::fromStdString(inv.customer.first_name + " " + inv.customer.last_name)));
+        m_wip_table->setItem(r, 2, new QTableWidgetItem(QString::fromStdString(inv.vehicle.license_plate + " (" + inv.vehicle.model + ")")));
+        m_wip_table->setItem(r, 3, new QTableWidgetItem(QString::fromStdString(inv.writer)));
+        
+        double tot = 0.0;
+        for (const auto& item : inv.items) tot += item.quantity * (item.unit_price / 100.0);
+        m_wip_table->setItem(r, 4, new QTableWidgetItem(QString("$%1").arg(QString::number(tot, 'f', 2))));
+
+        auto status_item = new QTableWidgetItem(QString::fromStdString(inv.status.empty() ? "New" : inv.status));
+        if (inv.status == "In Progress") status_item->setBackground(QBrush(QColor("#fff9c4")));
+        else if (inv.status == "Waiting on Parts") status_item->setBackground(QBrush(QColor("#ffe0b2")));
+        else if (inv.status == "Ready") status_item->setBackground(QBrush(QColor("#c8e6c9")));
+        m_wip_table->setItem(r, 5, status_item);
+    }
+
+    m_cnt_new_lbl->setText(QString::number(c_new));
+    m_cnt_in_progress_lbl->setText(QString::number(c_prog));
+    m_cnt_waiting_parts_lbl->setText(QString::number(c_parts));
+    m_cnt_ready_lbl->setText(QString::number(c_ready));
+}
+
+void WipDashboardDialog::onOpenTicket() {
+    auto ranges = m_wip_table->selectedRanges();
+    if (ranges.isEmpty()) return;
+
+    int r = ranges.first().topRow();
+    auto id_item = m_wip_table->item(r, 0);
+    if (id_item) {
+        m_selected_inv_id = id_item->text().toInt();
+        accept();
+    }
+}
+
+void WipDashboardDialog::onChangeStatus(const QString& new_status) {
+    auto ranges = m_wip_table->selectedRanges();
+    if (ranges.isEmpty()) return;
+
+    int r = ranges.first().topRow();
+    auto id_item = m_wip_table->item(r, 0);
+    if (id_item) {
+        int inv_id = id_item->text().toInt();
+        Invoice inv;
+        if (m_db->getInvoice(inv_id, inv)) {
+            m_db->updateInvoiceHeader(inv_id, inv.ticket_type, inv.mileage_in, inv.mileage_out, new_status.toStdString(), inv.supplies_removed, inv.writer);
+            refreshDashboard();
+        }
+    }
+}
+
+// ==========================================
+// CUSTOM PDF & PRINTING SETTINGS
+// ==========================================
+CustomPdfSettingsDialog::CustomPdfSettingsDialog(std::shared_ptr<DBManager> db, QWidget* parent)
+    : QDialog(parent), m_db(db) {
+    setWindowTitle("Custom PDF & Invoice Print Templates Settings");
+    resize(480, 260);
+
+    auto layout = new QVBoxLayout(this);
+
+    auto grid = new QGridLayout();
+    grid->addWidget(new QLabel("Shop Header Title Text:", this), 0, 0);
+    m_header_text_edit = new QLineEdit(this);
+    m_header_text_edit->setText(QString::fromStdString(m_db->getSetting("print_header_text")));
+    if (m_header_text_edit->text().isEmpty()) m_header_text_edit->setText("TuxRepair Auto Repair & Diagnostics");
+    grid->addWidget(m_header_text_edit, 0, 1);
+
+    grid->addWidget(new QLabel("Footer Terms / Disclaimer:", this), 1, 0);
+    m_footer_disclaimer_edit = new QLineEdit(this);
+    m_footer_disclaimer_edit->setText(QString::fromStdString(m_db->getSetting("print_footer_disclaimer")));
+    if (m_footer_disclaimer_edit->text().isEmpty()) m_footer_disclaimer_edit->setText("All repairs backed by 12-Month / 12,000-Mile Warranty. Payment due upon completion.");
+    grid->addWidget(m_footer_disclaimer_edit, 1, 1);
+
+    grid->addWidget(new QLabel("Shop Logo Image Path:", this), 2, 0);
+    m_logo_path_edit = new QLineEdit(this);
+    m_logo_path_edit->setText(QString::fromStdString(m_db->getSetting("print_logo_path")));
+    grid->addWidget(m_logo_path_edit, 2, 1);
+
+    auto browse_btn = new QPushButton("Browse...", this);
+    grid->addWidget(browse_btn, 2, 2);
+    layout->addLayout(grid);
+
+    connect(browse_btn, &QPushButton::clicked, this, [this]() {
+        QString f = QFileDialog::getOpenFileName(this, "Select Logo Image", QDir::homePath(), "Images (*.png *.jpg *.jpeg)");
+        if (!f.isEmpty()) m_logo_path_edit->setText(f);
+    });
+
+    auto btn_layout = new QHBoxLayout();
+    auto save_btn = new QPushButton("Save Preferences", this);
+    save_btn->setStyleSheet("background-color: #1565c0; color: white; font-weight: bold; padding: 6px;");
+    auto cancel_btn = new QPushButton("Cancel", this);
+
+    btn_layout->addWidget(cancel_btn);
+    btn_layout->addWidget(save_btn);
+    layout->addLayout(btn_layout);
+
+    connect(save_btn, &QPushButton::clicked, this, &CustomPdfSettingsDialog::onSaveSettings);
+    connect(cancel_btn, &QPushButton::clicked, this, &QDialog::reject);
+}
+
+void CustomPdfSettingsDialog::onSaveSettings() {
+    m_db->setSetting("print_header_text", m_header_text_edit->text().trimmed().toStdString());
+    m_db->setSetting("print_footer_disclaimer", m_footer_disclaimer_edit->text().trimmed().toStdString());
+    m_db->setSetting("print_logo_path", m_logo_path_edit->text().trimmed().toStdString());
+    QMessageBox::information(this, "Settings Saved", "Custom PDF print header and disclaimer settings updated successfully.");
     accept();
 }
 
