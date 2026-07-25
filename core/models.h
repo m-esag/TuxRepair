@@ -15,6 +15,9 @@ struct Customer {
     std::string address;
     std::string city;
     std::string phone_number;
+    std::string email;
+    std::string preferred_contact;
+    std::string notes;
 };
 
 struct Vehicle {
@@ -25,6 +28,9 @@ struct Vehicle {
     int year = 0;
     std::string model;
     std::string engine_specs;
+    std::string trim;
+    std::string transmission;
+    std::string color;
 };
 
 struct InvoiceItem {
@@ -34,7 +40,13 @@ struct InvoiceItem {
     std::string description;
     double quantity = 0.0;
     int64_t unit_price = 0; // in cents
-    std::string specification; // "Part" or mechanic name
+    std::string specification; // raw data or tech details
+    std::string item_type = "Part"; // "Part", "Labor", "Fee", "Sublet", "Discount"
+    std::string tech_assigned;
+    double discount_percent = 0.0;
+    bool taxable = true;
+    std::string line_notes;
+    std::string status = "Approved"; // "Pending", "Approved", "Declined", "Ordered", "Installed"
 };
 
 struct Invoice {
@@ -45,13 +57,39 @@ struct Invoice {
     int mileage_in = 0;
     int mileage_out = 0;
     std::string date_created;
-    std::string status; // "Open", "Finalized"
+    std::string status; // "New", "Intake", "Estimate", "Awaiting Approval", "Approved", "In Progress", "Waiting on Parts", "Ready", "Invoiced", "Closed"
     bool supplies_removed = false;
     std::string writer; // secretary / writer who did the billing
-    
+    std::string internal_notes;
+    std::string customer_notes;
+    std::string tech_notes;
+    std::string vehicle_notes;
+    std::string auth_notes;
+    int64_t prepayment_cents = 0;
+    std::string signature_data; // Base64 encoded or string representation
+    int64_t posted_tx_id = 0;   // 0 = not posted to ledger; non-0 = transactions.id of the posting
+
     std::vector<InvoiceItem> items;
     Customer customer;
     Vehicle vehicle;
+};
+
+struct StatusHistoryEntry {
+    int id = 0;
+    int invoice_id = 0;
+    std::string status;
+    std::string timestamp;
+    std::string user_name;
+};
+
+struct Attachment {
+    int id = 0;
+    int invoice_id = 0;
+    std::string file_path;
+    std::string file_name;
+    std::string upload_time;
+    bool is_internal = true;
+    int line_item_id = -1;
 };
 
 struct Account {

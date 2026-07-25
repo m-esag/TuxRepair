@@ -87,6 +87,29 @@ private:
     void onVisitSelected(int row);
 };
 
+// --- Signature Pad Dialog ---
+class SignaturePadDialog : public QDialog {
+    Q_OBJECT
+public:
+    explicit SignaturePadDialog(QWidget* parent = nullptr);
+    QString signatureBase64() const { return m_sig_base64; }
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
+
+private slots:
+    void onClear();
+    void onAccept();
+
+private:
+    QList<QList<QPoint>> m_strokes;
+    QString m_sig_base64;
+    QPushButton* m_clear_btn;
+    QPushButton* m_ok_btn;
+};
+
 // --- General Invoice / Quotes Lookup Dialog ---
 class InvoiceLookupDialog : public QDialog {
     Q_OBJECT

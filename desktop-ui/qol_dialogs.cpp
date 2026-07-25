@@ -4,6 +4,10 @@
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QMessageBox>
+#include <QPainter>
+#include <QMouseEvent>
+#include <QImage>
+#include <QBuffer>
 
 namespace tuxrepair {
 
@@ -530,6 +534,103 @@ void AddVehicleDialog::onSave() {
         QMessageBox::warning(this, "Empty Field", "License Plate is required.");
         return;
     }
+    accept();
+}
+
+// ==========================================
+// SIGNATURE PAD DIALOG
+// ==========================================
+SignaturePadDialog::SignaturePadDialog(QWidget* parent) : QDialog(parent) {
+    setWindowTitle("Estimate Approval Signature");
+    resize(400, 300);
+    setMinimumSize(400, 300);
+
+    auto main_layout = new QVBoxLayout(this);
+    auto instructions = new QLabel("Please sign inside the box below:", this);
+    instructions->setStyleSheet("font-weight: bold;");
+    main_layout->addWidget(instructions);
+
+    auto btn_layout = new QHBoxLayout();
+    m_clear_btn = new QPushButton("Clear", this);
+    m_clear_btn->setStyleSheet("padding: 6px 12px;");
+    m_ok_btn = new QPushButton("Accept Signature", this);
+    m_ok_btn->setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; padding: 6px 12px;");
+
+    btn_layout->addStretch();
+    btn_layout->addWidget(m_clear_btn);
+    btn_layout->addWidget(m_ok_btn);
+
+    main_layout->addStretch();
+    main_layout->addLayout(btn_layout);
+
+    connect(m_clear_btn, &QPushButton::clicked, this, &SignaturePadDialog::onClear);
+    connect(m_ok_btn, &QPushButton::clicked, this, &SignaturePadDialog::onAccept);
+}
+
+void SignaturePadDialog::mousePressEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton) {
+        QList<QPoint> new_stroke;
+        new_stroke.append(event->pos());
+        m_strokes.append(new_stroke);
+        update();
+    }
+}
+
+void SignaturePadDialog::mouseMoveEvent(QMouseEvent* event) {
+    if (event->buttons() & Qt::LeftButton && !m_strokes.isEmpty()) {
+        m_strokes.last().append(event->pos());
+        update();
+    }
+}
+
+void SignaturePadDialog::paintEvent(QPaintEvent* event) {
+    Q_UNUSED(event);
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+
+    // Draw bounds for signature box
+    painter.setPen(QPen(Qt::gray, 2, Qt::DashLine));
+    painter.drawRect(10, 30, width() - 20, height() - 80);
+
+    painter.setPen(QPen(Qt::blue, 3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    for (const auto& stroke : m_strokes) {
+        for (int i = 0; i < stroke.size() - 1; ++i) {
+            painter.drawLine(stroke[i], stroke[i+1]);
+        }
+    }
+}
+
+void SignaturePadDialog::onClear() {
+    m_strokes.clear();
+    m_sig_base64.clear();
+    update();
+}
+
+void SignaturePadDialog::onAccept() {
+    if (m_strokes.isEmpty()) {
+        QMessageBox::warning(this, "Empty Signature", "Please provide a signature before accepting.");
+        return;
+    }
+
+    // Render strokes to a QImage
+    QImage image(width(), height(), QImage::Format_ARGB32);
+    image.fill(Qt::white);
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(Qt::black, 4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    for (const auto& stroke : m_strokes) {
+        for (int i = 0; i < stroke.size() - 1; ++i) {
+            painter.drawLine(stroke[i], stroke[i+1]);
+        }
+    }
+    painter.end();
+
+    QByteArray ba;
+    QBuffer buffer(&ba);
+    buffer.open(QIODevice::WriteOnly);
+    image.save(&buffer, "PNG");
+    m_sig_base64 = QString::fromLatin1(ba.toBase64());
+
     accept();
 }
 

@@ -10,6 +10,8 @@
 #include <QComboBox>
 #include <QGroupBox>
 #include <QSpinBox>
+#include <QSplitter>
+#include <QTextEdit>
 #include <memory>
 #include "db_manager.h"
 #include "models.h"
@@ -75,6 +77,66 @@ private:
     void markDirty() { m_is_dirty = true; }
     void setupMenuBar();
 
+    // Status Pipeline & Action Toolbar
+    QWidget* m_status_pipeline_widget;
+    std::vector<QPushButton*> m_status_buttons;
+    QWidget* m_action_toolbar_widget;
+    QPushButton* m_btn_new_ro;
+    QPushButton* m_btn_save_ro;
+    QPushButton* m_btn_print_ro;
+    QPushButton* m_btn_send_est;
+    QPushButton* m_btn_approve_est;
+    QPushButton* m_btn_convert_inv;
+    QPushButton* m_btn_mark_ready;
+    QPushButton* m_btn_close_ro;
+    QPushButton* m_btn_duplicate;
+    QPushButton* m_btn_void_reopen;
+    QPushButton* m_btn_record_payment;
+
+    // Intake lookup extensions
+    QComboBox* m_intake_lookup_type_combo;
+    QLineEdit* m_intake_lookup_edit;
+    QPushButton* m_intake_search_btn;
+
+    // Collapsible Right Sidebar
+    QSplitter* m_main_splitter;
+    QWidget* m_right_sidebar;
+    QTabWidget* m_right_tabs;
+    QTableWidget* m_history_list;
+    QTextEdit* m_notes_internal;
+    QTextEdit* m_notes_customer;
+    QTextEdit* m_notes_tech;
+    QTextEdit* m_notes_vehicle;
+    QTextEdit* m_notes_auth;
+    QLabel* m_sig_preview_box;
+    QLabel* m_sig_status_lbl;
+    QTableWidget* m_attachments_table;
+    QPushButton* m_add_attachment_btn;
+    QPushButton* m_delete_attachment_btn;
+
+    // Bottom summary balance
+    QLabel* m_summary_prepaid_lbl;
+    QLabel* m_summary_balance_lbl;
+
+    // Helper Dialog slots
+    void onStatusButtonClicked(int index);
+    void onNewRO();
+    void onSaveRO();
+    void onPrintRO();
+    void onSendEstimate();
+    void onApproveEstimate();
+    void onConvertInvoice();
+    void onMarkReady();
+    void onCloseRO();
+    void onDuplicateRO();
+    void onVoidReopenRO();
+    void onRecordPayment();
+    void onAddAttachment();
+    void onDeleteAttachment();
+    void onIntakeSearch();
+    void onCellChangedGrid(int row, int col);
+    void updateStatusPipelineUI();
+
     // Tabs
     QTabWidget* m_tab_widget;
     QWidget* m_tickets_tab;
@@ -83,7 +145,6 @@ private:
     QWidget* m_scheduler_tab;
 
     // --- Rapid Intake UI Elements ---
-    QLineEdit* m_search_plate_edit;
     QCompleter* m_search_completer;
     QTableWidget* m_intake_results_table;
 
@@ -119,7 +180,6 @@ private:
     
     QPushButton* m_finalize_ticket_btn;
     QSpinBox* m_nav_invoice_spin;
-    QTableWidget* m_history_table;
 
     // Bottom summary labels
     QLabel* m_summary_parts_lbl;

@@ -114,6 +114,7 @@ std::string TravelerRenderer::generateTravelerHTML(const Invoice& invoice, const
     replaceAll(html, "{{TICKET_ID}}", std::to_string(invoice.id));
     replaceAll(html, "{{CUSTOMER_NAME}}", invoice.customer.first_name + " " + invoice.customer.last_name);
     replaceAll(html, "{{CUSTOMER_PHONE}}", invoice.customer.phone_number);
+    replaceAll(html, "{{CUSTOMER_EMAIL}}", invoice.customer.email);
     replaceAll(html, "{{CUSTOMER_ADDRESS}}", invoice.customer.address + ", " + invoice.customer.city);
     replaceAll(html, "{{VEHICLE_PLATE}}", invoice.vehicle.license_plate);
     replaceAll(html, "{{VEHICLE_YEAR_MODEL}}", std::to_string(invoice.vehicle.year) + " " + invoice.vehicle.model);
@@ -125,6 +126,16 @@ std::string TravelerRenderer::generateTravelerHTML(const Invoice& invoice, const
     replaceAll(html, "{{MILEAGE_OUT}}", std::to_string(invoice.mileage_out));
     replaceAll(html, "{{BILLED_BY}}", invoice.writer);
     
+    // Notes Categories
+    replaceAll(html, "{{CUSTOMER_NOTES}}", invoice.customer_notes);
+    replaceAll(html, "{{TECH_NOTES}}", invoice.tech_notes);
+    replaceAll(html, "{{VEHICLE_NOTES}}", invoice.vehicle_notes);
+    replaceAll(html, "{{AUTH_NOTES}}", invoice.auth_notes);
+
+    // Signature Captures
+    std::string sig_img = invoice.signature_data.empty() ? "" : "<img src=\"data:image/png;base64," + invoice.signature_data + "\" style=\"max-width:200px; height:auto;\" />";
+    replaceAll(html, "{{SIGNATURE_IMAGE}}", sig_img);
+
     replaceAll(html, "{{TICKET_SUBTOTAL}}", fmtDouble(parts_tot + labor_tot));
     replaceAll(html, "{{TICKET_SUPPLIES}}", fmtDouble(supplies));
     replaceAll(html, "{{TICKET_TAX}}", fmtDouble(tax));

@@ -7,18 +7,30 @@ Thank you for your interest in contributing to TuxRepair! This guide will help y
 1. **Fork** the repository on GitHub
 2. **Clone** your fork locally:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/TuxRepair.git
+   git clone https://github.com/m-esag/TuxRepair.git
    cd TuxRepair
    ```
 3. **Create a branch** for your work:
    ```bash
    git checkout -b feature/your-feature-name
    ```
-4. **Build** and test your changes:
+4. **Build** using one of the CMake presets:
    ```bash
-   cmake -B build -S .
-   cmake --build build -j$(nproc)
-   ./build/desktop-ui/tuxrepair-ui
+   # Debug build with ASan + UBSan (recommended for development)
+   cmake --preset debug
+   cmake --build --preset debug -j$(nproc)
+
+   # Optimized release build
+   cmake --preset release
+   cmake --build --preset release -j$(nproc)
+
+   # Run the app
+   ./build-debug/desktop-ui/tuxrepair-ui
+   ```
+5. **Run the tests** before opening a PR:
+   ```bash
+   cmake --build --preset debug
+   ctest --preset debug
    ```
 
 ## Code Style
@@ -53,6 +65,10 @@ Thank you for your interest in contributing to TuxRepair! This guide will help y
 2. Test both **light and dark themes** for any UI changes
 3. Update the **README** if you add new features or change behavior
 4. Write a clear PR description explaining **what** and **why**
+
+## Known Gaps
+
+- **Car catalog import script (`import_car_db.py` + the Teoalida sample SQL) is currently gitignored** and therefore unavailable to contributors after a fresh clone. The on-screen vehicle-catalog features still work off whatever data the local `tuxrepair.db` already contains, but the import path described in the README is not reproducible from the public repo today. **TODO(phase-6):** decide whether to ship the script + sample (preferred — possibly via Git LFS or a release artifact, since the sample is ~3.9 MB) or remove the car-catalog feature claims from the README.
 
 ## Reporting Bugs
 

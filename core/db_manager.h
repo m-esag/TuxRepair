@@ -36,7 +36,27 @@ public:
     bool updateInvoiceHeader(int id, const std::string& ticket_type, int mileage_in, int mileage_out, const std::string& status, bool supplies_removed = false, const std::string& writer = "Office");
     bool updateInvoiceVehicle(int invoice_id, int vehicle_id);
     bool saveInvoiceItems(int invoice_id, const std::vector<InvoiceItem>& items);
-    bool finalizeInvoice(int invoice_id, int64_t parts_cost_cents, double tax_rate = 0.08, bool supplies_removed = false);
+
+    // Finalize an invoice: posts balanced debit/credit splits to the ledger.
+    // tax_rate_bps is the sales-tax rate in basis points (e.g. 825 = 8.25%) so
+    // rounding happens in integer cents, never floating point.
+    // Returns false (and posts nothing) if the invoice is already posted.
+    bool finalizeInvoice(int invoice_id, int64_t parts_cost_cents,
+                         int tax_rate_bps = 800, bool supplies_removed = false);
+
+    // Reverse a finalized invoice by posting a mirror-image transaction.
+    // Leaves the original posting intact for audit. Sets status='Voided' and
+    // clears posted_tx_id so the invoice can be re-finalized after correction.
+    // Returns false if the invoice is not posted or already voided.
+    bool voidInvoice(int invoice_id);
+
+    // Record money received. If the invoice is posted, debits Checking and
+    // credits Accounts Receivable. If not yet posted (a deposit), debits
+    // Checking, credits Customer Deposits (Liability), and bumps
+    // prepayment_cents. method/reference are stored in the transaction
+    // description. Returns false if amount_cents <= 0.
+    bool recordPayment(int invoice_id, int64_t amount_cents,
+                       const std::string& method, const std::string& reference);
 
     // Accounting operations
     std::vector<Account> getAccounts();
@@ -80,6 +100,17 @@ public:
     // Settings persistence
     std::string getSetting(const std::string& key, const std::string& default_value = "");
     bool setSetting(const std::string& key, const std::string& value);
+
+    // Advanced features
+    bool updateInvoiceNotes(int id, const std::string& internal_notes, const std::string& customer_notes, const std::string& tech_notes, const std::string& vehicle_notes, const std::string& auth_notes);
+    bool updateInvoiceSignature(int id, const std::string& signature_data);
+    bool updateInvoicePrepayment(int id, int64_t prepayment_cents);
+    std::vector<Vehicle> getCustomerVehicles(int customer_id);
+    bool addStatusHistoryEntry(int invoice_id, const std::string& status, const std::string& user_name);
+    std::vector<StatusHistoryEntry> getStatusHistory(int invoice_id);
+    bool addAttachment(const Attachment& attachment);
+    std::vector<Attachment> getAttachments(int invoice_id);
+    bool deleteAttachment(int id);
 
 private:
     sqlite3* m_db;

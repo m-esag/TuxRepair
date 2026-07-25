@@ -1,5 +1,3 @@
-cmake_minimum_required(VERSION 3.16)
-
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
@@ -16,6 +14,8 @@ add_executable(tuxrepair-ui
     register_dialog.h
     template_editor_dialog.cpp
     template_editor_dialog.h
+    record_payment_dialog.cpp
+    record_payment_dialog.h
     resources.qrc
 )
 
@@ -24,4 +24,7 @@ target_link_libraries(tuxrepair-ui
         tuxrepair-core
         Qt6::Widgets
         Qt6::PrintSupport
+        TuxRepair::Warnings
 )
+
+target_compile_features(tuxrepair-ui PRIVATE cxx_std_23)

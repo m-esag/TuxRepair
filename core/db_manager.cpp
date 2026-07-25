@@ -12,6 +12,31 @@ std::string safe_col_text(sqlite3_stmt* stmt, int col) {
     const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, col));
     return text ? text : "";
 }
+
+// RAII guard for SQLite transactions. Constructed after a successful
+// BEGIN TRANSACTION; call commit() exactly once on success, or let it go out
+// of scope without committing to roll back. Replaces the goto-rollback pattern
+// (which is illegal in C++ when the jump would cross a variable with a non-
+// trivial initializer, e.g. a lambda capture).
+class TxnGuard {
+public:
+    explicit TxnGuard(sqlite3* db) : m_db(db), m_committed(false) {}
+    ~TxnGuard() {
+        if (!m_committed && m_db) {
+            sqlite3_exec(m_db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        }
+    }
+    bool commit() {
+        if (sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) return false;
+        m_committed = true;
+        return true;
+    }
+    TxnGuard(const TxnGuard&) = delete;
+    TxnGuard& operator=(const TxnGuard&) = delete;
+private:
+    sqlite3* m_db;
+    bool m_committed;
+};
 }
 
 DBManager::DBManager() : m_db(nullptr) {}
@@ -87,6 +112,7 @@ bool DBManager::initializeSchema() {
         "  status TEXT,"
         "  supplies_removed INTEGER DEFAULT 0,"
         "  writer TEXT DEFAULT 'Office',"
+        "  posted_tx_id INTEGER DEFAULT 0,"
         "  FOREIGN KEY(customer_id) REFERENCES customers(id),"
         "  FOREIGN KEY(vehicle_id) REFERENCES vehicles(id)"
         ");"
@@ -175,28 +201,128 @@ bool DBManager::initializeSchema() {
         "CREATE TABLE IF NOT EXISTS settings ("
         "  key TEXT PRIMARY KEY NOT NULL,"
         "  value TEXT NOT NULL"
+        ");"
+
+        "CREATE TABLE IF NOT EXISTS invoice_status_history ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  invoice_id INTEGER NOT NULL,"
+        "  status TEXT NOT NULL,"
+        "  timestamp TEXT NOT NULL,"
+        "  user_name TEXT NOT NULL,"
+        "  FOREIGN KEY(invoice_id) REFERENCES invoices(id) ON DELETE CASCADE"
+        ");"
+
+        "CREATE TABLE IF NOT EXISTS attachments ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  invoice_id INTEGER NOT NULL,"
+        "  file_path TEXT NOT NULL,"
+        "  file_name TEXT NOT NULL,"
+        "  upload_time TEXT NOT NULL,"
+        "  is_internal INTEGER DEFAULT 1,"
+        "  line_item_id INTEGER DEFAULT -1,"
+        "  FOREIGN KEY(invoice_id) REFERENCES invoices(id) ON DELETE CASCADE"
+        ");"
+
+        "CREATE TABLE IF NOT EXISTS estimate_approvals ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  invoice_id INTEGER NOT NULL,"
+        "  signature_data TEXT,"
+        "  authorized_by TEXT,"
+        "  authorization_date TEXT,"
+        "  auth_notes TEXT,"
+        "  revision_number INTEGER DEFAULT 1,"
+        "  FOREIGN KEY(invoice_id) REFERENCES invoices(id) ON DELETE CASCADE"
         ");";
 
     if (!executeSQL(sql_schema)) return false;
 
-    // Ensure supplies_removed column exists in invoices table for backward compatibility
-    executeSQL("ALTER TABLE invoices ADD COLUMN supplies_removed INTEGER DEFAULT 0;");
-    executeSQL("ALTER TABLE invoices ADD COLUMN writer TEXT DEFAULT 'Office';");
+    // Schema migrations (backward compatibility with older DBs).
+    //
+    // Each ADD COLUMN is guarded by a PRAGMA table_info check so that on a
+    // fresh DB (where the column already exists in the CREATE TABLE above) we
+    // don't spew "duplicate column name" errors to stderr on every launch.
+    // The RENAME COLUMN is likewise guarded against the case where the source
+    // column no longer exists (fresh schema uses part_number directly).
+    auto add_column_if_missing = [&](const char* table, const char* col, const char* decl) {
+        sqlite3_stmt* chk = nullptr;
+        std::string q = std::string("PRAGMA table_info(") + table + ");";
+        bool found = false;
+        if (sqlite3_prepare_v2(m_db, q.c_str(), -1, &chk, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(chk) == SQLITE_ROW) {
+                const char* name = reinterpret_cast<const char*>(sqlite3_column_text(chk, 1));
+                if (name && name == std::string(col)) { found = true; break; }
+            }
+            sqlite3_finalize(chk);
+        }
+        if (!found) {
+            std::string alter = std::string("ALTER TABLE ") + table + " ADD COLUMN " + col + " " + decl + ";";
+            executeSQL(alter);
+        }
+    };
 
-    // Ensure item_type column is renamed to part_number in invoice_items for backward compatibility
-    executeSQL("ALTER TABLE invoice_items RENAME COLUMN item_type TO part_number;");
+    // invoices
+    add_column_if_missing("invoices", "supplies_removed",  "INTEGER DEFAULT 0");
+    add_column_if_missing("invoices", "writer",            "TEXT DEFAULT 'Office'");
+    add_column_if_missing("invoices", "internal_notes",    "TEXT");
+    add_column_if_missing("invoices", "customer_notes",    "TEXT");
+    add_column_if_missing("invoices", "tech_notes",        "TEXT");
+    add_column_if_missing("invoices", "vehicle_notes",     "TEXT");
+    add_column_if_missing("invoices", "auth_notes",        "TEXT");
+    add_column_if_missing("invoices", "prepayment_cents",  "INTEGER DEFAULT 0");
+    add_column_if_missing("invoices", "signature_data",    "TEXT");
+    // posted_tx_id links a finalized invoice to its ledger transaction. 0 = not
+    // posted; non-0 = transactions.id. Doubles as the idempotency guard for
+    // finalizeInvoice() and the lock signal for the UI.
+    add_column_if_missing("invoices", "posted_tx_id",      "INTEGER DEFAULT 0");
+    // customers
+    add_column_if_missing("customers", "email",            "TEXT");
+    add_column_if_missing("customers", "preferred_contact", "TEXT");
+    add_column_if_missing("customers", "notes",            "TEXT");
+    // vehicles
+    add_column_if_missing("vehicles", "trim",              "TEXT");
+    add_column_if_missing("vehicles", "transmission",      "TEXT");
+    add_column_if_missing("vehicles", "color",             "TEXT");
+    // invoice_items
+    add_column_if_missing("invoice_items", "specification",    "TEXT NOT NULL DEFAULT 'Part'");
+    add_column_if_missing("invoice_items", "item_type",        "TEXT DEFAULT 'Part'");
+    add_column_if_missing("invoice_items", "tech_assigned",    "TEXT");
+    add_column_if_missing("invoice_items", "discount_percent", "REAL DEFAULT 0.0");
+    add_column_if_missing("invoice_items", "taxable",          "INTEGER DEFAULT 1");
+    add_column_if_missing("invoice_items", "line_notes",       "TEXT");
+    add_column_if_missing("invoice_items", "status",           "TEXT DEFAULT 'Approved'");
 
-    // Ensure specification column exists in invoice_items table for backward compatibility
-    executeSQL("ALTER TABLE invoice_items ADD COLUMN specification TEXT NOT NULL DEFAULT 'Part';");
+    // Legacy: very old DBs named the SKU column "item_type"; modern schema
+    // creates it as "part_number". Only attempt the rename if the legacy
+    // column is present AND the new one is absent (otherwise SQLite errors).
+    {
+        auto has_column = [&](const char* table, const char* col) -> bool {
+            sqlite3_stmt* chk = nullptr;
+            std::string q = std::string("PRAGMA table_info(") + table + ");";
+            bool found = false;
+            if (sqlite3_prepare_v2(m_db, q.c_str(), -1, &chk, nullptr) == SQLITE_OK) {
+                while (sqlite3_step(chk) == SQLITE_ROW) {
+                    const char* name = reinterpret_cast<const char*>(sqlite3_column_text(chk, 1));
+                    if (name && name == std::string(col)) { found = true; break; }
+                }
+                sqlite3_finalize(chk);
+            }
+            return found;
+        };
+        if (has_column("invoice_items", "item_type") && !has_column("invoice_items", "part_number")) {
+            executeSQL("ALTER TABLE invoice_items RENAME COLUMN item_type TO part_number;");
+        }
+    }
 
     // Seed default accounts, bays, job kits, and inventory
     std::string seed_data = 
         "INSERT OR IGNORE INTO accounts (name, type) VALUES ('Checking Asset', 'Asset');"
         "INSERT OR IGNORE INTO accounts (name, type) VALUES ('Parts Inventory Asset', 'Asset');"
+        "INSERT OR IGNORE INTO accounts (name, type) VALUES ('Accounts Receivable', 'Asset');"
         "INSERT OR IGNORE INTO accounts (name, type) VALUES ('Parts Income', 'Income');"
         "INSERT OR IGNORE INTO accounts (name, type) VALUES ('Labor Income', 'Income');"
         "INSERT OR IGNORE INTO accounts (name, type) VALUES ('Cost of Goods Sold Expense', 'Expense');"
         "INSERT OR IGNORE INTO accounts (name, type) VALUES ('Sales Tax Liability', 'Liability');"
+        "INSERT OR IGNORE INTO accounts (name, type) VALUES ('Customer Deposits', 'Liability');"
         
         "INSERT OR IGNORE INTO bays (name) VALUES ('Bay 1 - Lift 1');"
         "INSERT OR IGNORE INTO bays (name) VALUES ('Bay 2 - Lift 2');"
@@ -219,23 +345,13 @@ bool DBManager::initializeSchema() {
     if (res) {
         seedDefaultTemplates();
     }
-    // Check columns of invoice_items
-    std::string check_sql = "PRAGMA table_info(invoice_items);";
-    sqlite3_stmt* stmt_chk = nullptr;
-    if (sqlite3_prepare_v2(m_db, check_sql.c_str(), -1, &stmt_chk, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(stmt_chk) == SQLITE_ROW) {
-            const char* col_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt_chk, 1));
-            std::cerr << "invoice_items column: " << (col_name ? col_name : "NULL") << std::endl;
-        }
-        sqlite3_finalize(stmt_chk);
-    }
 
     return res;
 }
 
 int DBManager::insertCustomer(const Customer& customer) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    std::string sql = "INSERT INTO customers (last_name, first_name, middle_name, address, city, phone_number) VALUES (?, ?, ?, ?, ?, ?);";
+    std::string sql = "INSERT INTO customers (last_name, first_name, middle_name, address, city, phone_number, email, preferred_contact, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return -1;
 
@@ -245,6 +361,9 @@ int DBManager::insertCustomer(const Customer& customer) {
     sqlite3_bind_text(stmt, 4, customer.address.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 5, customer.city.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 6, customer.phone_number.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 7, customer.email.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 8, customer.preferred_contact.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 9, customer.notes.c_str(), -1, SQLITE_TRANSIENT);
 
     int id = -1;
     if (sqlite3_step(stmt) == SQLITE_DONE) {
@@ -256,7 +375,7 @@ int DBManager::insertCustomer(const Customer& customer) {
 
 bool DBManager::getCustomer(int id, Customer& out_customer) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    std::string sql = "SELECT id, last_name, first_name, middle_name, address, city, phone_number FROM customers WHERE id = ?;";
+    std::string sql = "SELECT id, last_name, first_name, middle_name, address, city, phone_number, email, preferred_contact, notes FROM customers WHERE id = ?;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
 
@@ -267,14 +386,13 @@ bool DBManager::getCustomer(int id, Customer& out_customer) {
         out_customer.id = sqlite3_column_int(stmt, 0);
         out_customer.last_name = safe_col_text(stmt, 1);
         out_customer.first_name = safe_col_text(stmt, 2);
-        const char* mid = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-        out_customer.middle_name = mid ? mid : "";
-        const char* addr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
-        out_customer.address = addr ? addr : "";
-        const char* city = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
-        out_customer.city = city ? city : "";
-        const char* phone = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
-        out_customer.phone_number = phone ? phone : "";
+        out_customer.middle_name = safe_col_text(stmt, 3);
+        out_customer.address = safe_col_text(stmt, 4);
+        out_customer.city = safe_col_text(stmt, 5);
+        out_customer.phone_number = safe_col_text(stmt, 6);
+        out_customer.email = safe_col_text(stmt, 7);
+        out_customer.preferred_contact = safe_col_text(stmt, 8);
+        out_customer.notes = safe_col_text(stmt, 9);
         found = true;
     }
     sqlite3_finalize(stmt);
@@ -283,7 +401,7 @@ bool DBManager::getCustomer(int id, Customer& out_customer) {
 
 bool DBManager::updateCustomer(const Customer& customer) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    std::string sql = "UPDATE customers SET last_name = ?, first_name = ?, middle_name = ?, address = ?, city = ?, phone_number = ? WHERE id = ?;";
+    std::string sql = "UPDATE customers SET last_name = ?, first_name = ?, middle_name = ?, address = ?, city = ?, phone_number = ?, email = ?, preferred_contact = ?, notes = ? WHERE id = ?;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
 
@@ -293,7 +411,10 @@ bool DBManager::updateCustomer(const Customer& customer) {
     sqlite3_bind_text(stmt, 4, customer.address.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 5, customer.city.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 6, customer.phone_number.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 7, customer.id);
+    sqlite3_bind_text(stmt, 7, customer.email.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 8, customer.preferred_contact.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 9, customer.notes.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 10, customer.id);
 
     int rc = sqlite3_step(stmt);
     bool ok = (rc == SQLITE_DONE);
@@ -306,7 +427,7 @@ bool DBManager::updateCustomer(const Customer& customer) {
 
 int DBManager::insertVehicle(const Vehicle& vehicle) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    std::string sql = "INSERT INTO vehicles (customer_id, license_plate, vin, year, model, engine_specs) VALUES (?, ?, ?, ?, ?, ?);";
+    std::string sql = "INSERT INTO vehicles (customer_id, license_plate, vin, year, model, engine_specs, trim, transmission, color) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return -1;
 
@@ -316,6 +437,9 @@ int DBManager::insertVehicle(const Vehicle& vehicle) {
     sqlite3_bind_int(stmt, 4, vehicle.year);
     sqlite3_bind_text(stmt, 5, vehicle.model.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 6, vehicle.engine_specs.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 7, vehicle.trim.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 8, vehicle.transmission.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 9, vehicle.color.c_str(), -1, SQLITE_TRANSIENT);
 
     int id = -1;
     if (sqlite3_step(stmt) == SQLITE_DONE) {
@@ -327,7 +451,7 @@ int DBManager::insertVehicle(const Vehicle& vehicle) {
 
 bool DBManager::getVehicle(int id, Vehicle& out_vehicle) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    std::string sql = "SELECT id, customer_id, license_plate, vin, year, model, engine_specs FROM vehicles WHERE id = ?;";
+    std::string sql = "SELECT id, customer_id, license_plate, vin, year, model, engine_specs, trim, transmission, color FROM vehicles WHERE id = ?;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
 
@@ -338,12 +462,13 @@ bool DBManager::getVehicle(int id, Vehicle& out_vehicle) {
         out_vehicle.id = sqlite3_column_int(stmt, 0);
         out_vehicle.customer_id = sqlite3_column_int(stmt, 1);
         out_vehicle.license_plate = safe_col_text(stmt, 2);
-        const char* vin = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-        out_vehicle.vin = vin ? vin : "";
+        out_vehicle.vin = safe_col_text(stmt, 3);
         out_vehicle.year = sqlite3_column_int(stmt, 4);
         out_vehicle.model = safe_col_text(stmt, 5);
-        const char* eng = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
-        out_vehicle.engine_specs = eng ? eng : "";
+        out_vehicle.engine_specs = safe_col_text(stmt, 6);
+        out_vehicle.trim = safe_col_text(stmt, 7);
+        out_vehicle.transmission = safe_col_text(stmt, 8);
+        out_vehicle.color = safe_col_text(stmt, 9);
         found = true;
     }
     sqlite3_finalize(stmt);
@@ -353,7 +478,7 @@ bool DBManager::getVehicle(int id, Vehicle& out_vehicle) {
 std::vector<Vehicle> DBManager::searchVehiclesByPlate(const std::string& plate) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     std::vector<Vehicle> results;
-    std::string sql = "SELECT id, customer_id, license_plate, vin, year, model, engine_specs FROM vehicles WHERE license_plate LIKE ?;";
+    std::string sql = "SELECT id, customer_id, license_plate, vin, year, model, engine_specs, trim, transmission, color FROM vehicles WHERE license_plate LIKE ?;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return results;
 
@@ -365,12 +490,13 @@ std::vector<Vehicle> DBManager::searchVehiclesByPlate(const std::string& plate) 
         v.id = sqlite3_column_int(stmt, 0);
         v.customer_id = sqlite3_column_int(stmt, 1);
         v.license_plate = safe_col_text(stmt, 2);
-        const char* vin = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-        v.vin = vin ? vin : "";
+        v.vin = safe_col_text(stmt, 3);
         v.year = sqlite3_column_int(stmt, 4);
         v.model = safe_col_text(stmt, 5);
-        const char* eng = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
-        v.engine_specs = eng ? eng : "";
+        v.engine_specs = safe_col_text(stmt, 6);
+        v.trim = safe_col_text(stmt, 7);
+        v.transmission = safe_col_text(stmt, 8);
+        v.color = safe_col_text(stmt, 9);
         results.push_back(v);
     }
     sqlite3_finalize(stmt);
@@ -379,7 +505,7 @@ std::vector<Vehicle> DBManager::searchVehiclesByPlate(const std::string& plate) 
 
 bool DBManager::updateVehicle(const Vehicle& vehicle) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    std::string sql = "UPDATE vehicles SET license_plate = ?, vin = ?, year = ?, model = ?, engine_specs = ? WHERE id = ?;";
+    std::string sql = "UPDATE vehicles SET license_plate = ?, vin = ?, year = ?, model = ?, engine_specs = ?, trim = ?, transmission = ?, color = ? WHERE id = ?;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
 
@@ -388,7 +514,10 @@ bool DBManager::updateVehicle(const Vehicle& vehicle) {
     sqlite3_bind_int(stmt, 3, vehicle.year);
     sqlite3_bind_text(stmt, 4, vehicle.model.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 5, vehicle.engine_specs.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 6, vehicle.id);
+    sqlite3_bind_text(stmt, 6, vehicle.trim.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 7, vehicle.transmission.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 8, vehicle.color.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 9, vehicle.id);
 
     int rc = sqlite3_step(stmt);
     bool ok = (rc == SQLITE_DONE);
@@ -421,7 +550,7 @@ int DBManager::createInvoice(int customer_id, int vehicle_id, const std::string&
 
 bool DBManager::getInvoice(int id, Invoice& out_invoice) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    std::string sql = "SELECT id, customer_id, vehicle_id, ticket_type, mileage_in, mileage_out, date_created, status, supplies_removed, writer FROM invoices WHERE id = ?;";
+    std::string sql = "SELECT id, customer_id, vehicle_id, ticket_type, mileage_in, mileage_out, date_created, status, supplies_removed, writer, internal_notes, customer_notes, tech_notes, vehicle_notes, auth_notes, prepayment_cents, signature_data, posted_tx_id FROM invoices WHERE id = ?;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
 
@@ -432,17 +561,21 @@ bool DBManager::getInvoice(int id, Invoice& out_invoice) {
         out_invoice.id = sqlite3_column_int(stmt, 0);
         out_invoice.customer_id = sqlite3_column_int(stmt, 1);
         out_invoice.vehicle_id = sqlite3_column_int(stmt, 2);
-        const char* ttype = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-        out_invoice.ticket_type = ttype ? ttype : "";
+        out_invoice.ticket_type = safe_col_text(stmt, 3);
         out_invoice.mileage_in = sqlite3_column_int(stmt, 4);
         out_invoice.mileage_out = sqlite3_column_int(stmt, 5);
-        const char* dcreated = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
-        out_invoice.date_created = dcreated ? dcreated : "";
-        const char* stat = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
-        out_invoice.status = stat ? stat : "";
+        out_invoice.date_created = safe_col_text(stmt, 6);
+        out_invoice.status = safe_col_text(stmt, 7);
         out_invoice.supplies_removed = sqlite3_column_int(stmt, 8) != 0;
-        const char* wr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
-        out_invoice.writer = wr ? wr : "Office";
+        out_invoice.writer = safe_col_text(stmt, 9);
+        out_invoice.internal_notes = safe_col_text(stmt, 10);
+        out_invoice.customer_notes = safe_col_text(stmt, 11);
+        out_invoice.tech_notes = safe_col_text(stmt, 12);
+        out_invoice.vehicle_notes = safe_col_text(stmt, 13);
+        out_invoice.auth_notes = safe_col_text(stmt, 14);
+        out_invoice.prepayment_cents = sqlite3_column_int64(stmt, 15);
+        out_invoice.signature_data = safe_col_text(stmt, 16);
+        out_invoice.posted_tx_id = sqlite3_column_int64(stmt, 17);
         found = true;
     }
     sqlite3_finalize(stmt);
@@ -451,24 +584,21 @@ bool DBManager::getInvoice(int id, Invoice& out_invoice) {
 
     // Fetch customer details
     {
-        std::string sql_c = "SELECT id, last_name, first_name, middle_name, address, city, phone_number FROM customers WHERE id = ?;";
+        std::string sql_c = "SELECT id, last_name, first_name, middle_name, address, city, phone_number, email, preferred_contact, notes FROM customers WHERE id = ?;";
         sqlite3_stmt* stmt_c = nullptr;
         if (sqlite3_prepare_v2(m_db, sql_c.c_str(), -1, &stmt_c, nullptr) == SQLITE_OK) {
             sqlite3_bind_int(stmt_c, 1, out_invoice.customer_id);
             if (sqlite3_step(stmt_c) == SQLITE_ROW) {
                 out_invoice.customer.id = sqlite3_column_int(stmt_c, 0);
-                const char* ln = reinterpret_cast<const char*>(sqlite3_column_text(stmt_c, 1));
-                out_invoice.customer.last_name = ln ? ln : "";
-                const char* fn = reinterpret_cast<const char*>(sqlite3_column_text(stmt_c, 2));
-                out_invoice.customer.first_name = fn ? fn : "";
-                const char* mid = reinterpret_cast<const char*>(sqlite3_column_text(stmt_c, 3));
-                out_invoice.customer.middle_name = mid ? mid : "";
-                const char* addr = reinterpret_cast<const char*>(sqlite3_column_text(stmt_c, 4));
-                out_invoice.customer.address = addr ? addr : "";
-                const char* city = reinterpret_cast<const char*>(sqlite3_column_text(stmt_c, 5));
-                out_invoice.customer.city = city ? city : "";
-                const char* phone = reinterpret_cast<const char*>(sqlite3_column_text(stmt_c, 6));
-                out_invoice.customer.phone_number = phone ? phone : "";
+                out_invoice.customer.last_name = safe_col_text(stmt_c, 1);
+                out_invoice.customer.first_name = safe_col_text(stmt_c, 2);
+                out_invoice.customer.middle_name = safe_col_text(stmt_c, 3);
+                out_invoice.customer.address = safe_col_text(stmt_c, 4);
+                out_invoice.customer.city = safe_col_text(stmt_c, 5);
+                out_invoice.customer.phone_number = safe_col_text(stmt_c, 6);
+                out_invoice.customer.email = safe_col_text(stmt_c, 7);
+                out_invoice.customer.preferred_contact = safe_col_text(stmt_c, 8);
+                out_invoice.customer.notes = safe_col_text(stmt_c, 9);
             }
             sqlite3_finalize(stmt_c);
         }
@@ -476,22 +606,21 @@ bool DBManager::getInvoice(int id, Invoice& out_invoice) {
 
     // Fetch vehicle details
     {
-        std::string sql_v = "SELECT id, customer_id, license_plate, vin, year, model, engine_specs FROM vehicles WHERE id = ?;";
+        std::string sql_v = "SELECT id, customer_id, license_plate, vin, year, model, engine_specs, trim, transmission, color FROM vehicles WHERE id = ?;";
         sqlite3_stmt* stmt_v = nullptr;
         if (sqlite3_prepare_v2(m_db, sql_v.c_str(), -1, &stmt_v, nullptr) == SQLITE_OK) {
             sqlite3_bind_int(stmt_v, 1, out_invoice.vehicle_id);
             if (sqlite3_step(stmt_v) == SQLITE_ROW) {
                 out_invoice.vehicle.id = sqlite3_column_int(stmt_v, 0);
                 out_invoice.vehicle.customer_id = sqlite3_column_int(stmt_v, 1);
-                const char* vplate = reinterpret_cast<const char*>(sqlite3_column_text(stmt_v, 2));
-                out_invoice.vehicle.license_plate = vplate ? vplate : "";
-                const char* vin = reinterpret_cast<const char*>(sqlite3_column_text(stmt_v, 3));
-                out_invoice.vehicle.vin = vin ? vin : "";
+                out_invoice.vehicle.license_plate = safe_col_text(stmt_v, 2);
+                out_invoice.vehicle.vin = safe_col_text(stmt_v, 3);
                 out_invoice.vehicle.year = sqlite3_column_int(stmt_v, 4);
-                const char* vmod = reinterpret_cast<const char*>(sqlite3_column_text(stmt_v, 5));
-                out_invoice.vehicle.model = vmod ? vmod : "";
-                const char* eng = reinterpret_cast<const char*>(sqlite3_column_text(stmt_v, 6));
-                out_invoice.vehicle.engine_specs = eng ? eng : "";
+                out_invoice.vehicle.model = safe_col_text(stmt_v, 5);
+                out_invoice.vehicle.engine_specs = safe_col_text(stmt_v, 6);
+                out_invoice.vehicle.trim = safe_col_text(stmt_v, 7);
+                out_invoice.vehicle.transmission = safe_col_text(stmt_v, 8);
+                out_invoice.vehicle.color = safe_col_text(stmt_v, 9);
             }
             sqlite3_finalize(stmt_v);
         }
@@ -500,7 +629,7 @@ bool DBManager::getInvoice(int id, Invoice& out_invoice) {
     // Fetch invoice items
     {
         out_invoice.items.clear();
-        std::string sql_i = "SELECT id, invoice_id, part_number, description, quantity, unit_price, specification FROM invoice_items WHERE invoice_id = ?;";
+        std::string sql_i = "SELECT id, invoice_id, part_number, description, quantity, unit_price, specification, item_type, tech_assigned, discount_percent, taxable, line_notes, status FROM invoice_items WHERE invoice_id = ?;";
         sqlite3_stmt* stmt_i = nullptr;
         if (sqlite3_prepare_v2(m_db, sql_i.c_str(), -1, &stmt_i, nullptr) == SQLITE_OK) {
             sqlite3_bind_int(stmt_i, 1, id);
@@ -508,14 +637,17 @@ bool DBManager::getInvoice(int id, Invoice& out_invoice) {
                 InvoiceItem item;
                 item.id = sqlite3_column_int(stmt_i, 0);
                 item.invoice_id = sqlite3_column_int(stmt_i, 1);
-                const char* pn = reinterpret_cast<const char*>(sqlite3_column_text(stmt_i, 2));
-                item.part_number = pn ? pn : "";
-                const char* ds = reinterpret_cast<const char*>(sqlite3_column_text(stmt_i, 3));
-                item.description = ds ? ds : "";
+                item.part_number = safe_col_text(stmt_i, 2);
+                item.description = safe_col_text(stmt_i, 3);
                 item.quantity = sqlite3_column_double(stmt_i, 4);
                 item.unit_price = sqlite3_column_int64(stmt_i, 5);
-                const char* sp = reinterpret_cast<const char*>(sqlite3_column_text(stmt_i, 6));
-                item.specification = sp ? sp : "";
+                item.specification = safe_col_text(stmt_i, 6);
+                item.item_type = safe_col_text(stmt_i, 7);
+                item.tech_assigned = safe_col_text(stmt_i, 8);
+                item.discount_percent = sqlite3_column_double(stmt_i, 9);
+                item.taxable = sqlite3_column_int(stmt_i, 10) != 0;
+                item.line_notes = safe_col_text(stmt_i, 11);
+                item.status = safe_col_text(stmt_i, 12);
                 out_invoice.items.push_back(item);
             }
             sqlite3_finalize(stmt_i);
@@ -607,7 +739,7 @@ bool DBManager::saveInvoiceItems(int invoice_id, const std::vector<InvoiceItem>&
     sqlite3_finalize(del_stmt);
 
     // Insert new
-    std::string ins_sql = "INSERT INTO invoice_items (invoice_id, part_number, description, quantity, unit_price, specification) VALUES (?, ?, ?, ?, ?, ?);";
+    std::string ins_sql = "INSERT INTO invoice_items (invoice_id, part_number, description, quantity, unit_price, specification, item_type, tech_assigned, discount_percent, taxable, line_notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
     sqlite3_stmt* ins_stmt = nullptr;
     rc = sqlite3_prepare_v2(m_db, ins_sql.c_str(), -1, &ins_stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -624,6 +756,12 @@ bool DBManager::saveInvoiceItems(int invoice_id, const std::vector<InvoiceItem>&
         sqlite3_bind_double(ins_stmt, 4, item.quantity);
         sqlite3_bind_int64(ins_stmt, 5, item.unit_price);
         sqlite3_bind_text(ins_stmt, 6, item.specification.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins_stmt, 7, item.item_type.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins_stmt, 8, item.tech_assigned.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(ins_stmt, 9, item.discount_percent);
+        sqlite3_bind_int(ins_stmt, 10, item.taxable ? 1 : 0);
+        sqlite3_bind_text(ins_stmt, 11, item.line_notes.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins_stmt, 12, item.status.c_str(), -1, SQLITE_TRANSIENT);
         rc = sqlite3_step(ins_stmt);
         if (rc != SQLITE_DONE) {
             std::cerr << "saveInvoiceItems step INSERT failed: " << sqlite3_errmsg(m_db) << " (code: " << rc << ")" << std::endl;
@@ -655,98 +793,150 @@ int DBManager::getAccountIdByName(const std::string& name) {
     return id;
 }
 
-bool DBManager::finalizeInvoice(int invoice_id, int64_t parts_cost_cents, double tax_rate, bool supplies_removed) {
+bool DBManager::finalizeInvoice(int invoice_id, int64_t parts_cost_cents,
+                                int tax_rate_bps, bool supplies_removed) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
-    // Calculate totals of invoice items
-    int64_t parts_retail_total = 0;
-    int64_t labor_total = 0;
-
-    std::string sql_items = "SELECT specification, quantity, unit_price FROM invoice_items WHERE invoice_id = ?;";
-    sqlite3_stmt* stmt_items = nullptr;
-    if (sqlite3_prepare_v2(m_db, sql_items.c_str(), -1, &stmt_items, nullptr) != SQLITE_OK) return false;
-    sqlite3_bind_int(stmt_items, 1, invoice_id);
-
-    while (sqlite3_step(stmt_items) == SQLITE_ROW) {
-        const char* spec_raw = reinterpret_cast<const char*>(sqlite3_column_text(stmt_items, 0));
-        std::string spec = spec_raw ? spec_raw : "";
-        double qty = sqlite3_column_double(stmt_items, 1);
-        int64_t price = sqlite3_column_int64(stmt_items, 2);
-        int64_t total = static_cast<int64_t>(qty * price);
-        
-        std::string spec_lower = spec;
-        spec_lower.erase(0, spec_lower.find_first_not_of(" \t\r\n"));
-        spec_lower.erase(spec_lower.find_last_not_of(" \t\r\n") + 1);
-        std::transform(spec_lower.begin(), spec_lower.end(), spec_lower.begin(), ::tolower);
-        
-        if (spec_lower == "part") {
-            parts_retail_total += total;
-        } else {
-            labor_total += total;
+    // --- Idempotency guard (audit C6). ---------------------------------------
+    // An invoice with a non-zero posted_tx_id is already in the ledger. Refuse
+    // to re-post; the caller surfaces a message. Corrections require voiding
+    // first (voidInvoice clears posted_tx_id).
+    {
+        sqlite3_stmt* chk = nullptr;
+        std::string q = "SELECT posted_tx_id FROM invoices WHERE id = ?;";
+        if (sqlite3_prepare_v2(m_db, q.c_str(), -1, &chk, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_int(chk, 1, invoice_id);
+        int64_t already_posted = 0;
+        if (sqlite3_step(chk) == SQLITE_ROW) {
+            already_posted = sqlite3_column_int64(chk, 0);
+        }
+        sqlite3_finalize(chk);
+        if (already_posted != 0) {
+            std::cerr << "finalizeInvoice: invoice #" << invoice_id
+                      << " is already posted (tx " << already_posted << ")" << std::endl;
+            return false;
         }
     }
-    sqlite3_finalize(stmt_items);
 
-    // Calculate tax on parts retail using user-configured rate
-    int64_t tax_liability = static_cast<int64_t>(parts_retail_total * tax_rate);
-    
-    // Calculate shop supplies (5% of labor, min $2.00, max $25.00)
+    // --- Load invoice header (prepayment_cents) + line items. ----------------
+    // All monetary math from here on is integer cents. No floating point.
+    int64_t prepayment_cents = 0;
+    {
+        sqlite3_stmt* hdr = nullptr;
+        std::string q = "SELECT prepayment_cents FROM invoices WHERE id = ?;";
+        if (sqlite3_prepare_v2(m_db, q.c_str(), -1, &hdr, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_int(hdr, 1, invoice_id);
+        if (sqlite3_step(hdr) == SQLITE_ROW) {
+            prepayment_cents = sqlite3_column_int64(hdr, 0);
+        }
+        sqlite3_finalize(hdr);
+    }
+
+    // Classification now keys off item_type (Part/Labor/Fee/Sublet/Discount),
+    // NOT specification (audit H3). specification remains in the schema for
+    // legacy data but is no longer read here.
+    int64_t parts_retail_total = 0;   // item_type == "Part"
+    int64_t labor_total = 0;          // item_type == "Labor"
+    int64_t fees_total = 0;           // item_type == "Fee" or "Sublet"
+    int64_t discount_total = 0;       // item_type == "Discount"
+    int64_t taxable_parts_total = 0;  // Parts whose taxable flag is set
+
+    {
+        std::string sql_items =
+            "SELECT item_type, quantity, unit_price, taxable FROM invoice_items WHERE invoice_id = ?;";
+        sqlite3_stmt* stmt_items = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql_items.c_str(), -1, &stmt_items, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_int(stmt_items, 1, invoice_id);
+
+        while (sqlite3_step(stmt_items) == SQLITE_ROW) {
+            std::string itype = safe_col_text(stmt_items, 0);
+            // Trim + lowercase for case-insensitive matching.
+            std::string t = itype;
+            t.erase(0, t.find_first_not_of(" \t\r\n"));
+            t.erase(t.find_last_not_of(" \t\r\n") + 1);
+            std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+
+            // qty*price as integer cents. qty may be fractional (e.g. 0.5 hrs),
+            // so round the product to the nearest cent rather than truncate.
+            double qty = sqlite3_column_double(stmt_items, 1);
+            int64_t price = sqlite3_column_int64(stmt_items, 2);
+            int64_t total = static_cast<int64_t>(qty * price + (qty * price >= 0 ? 0.5 : -0.5));
+            int taxable = sqlite3_column_int(stmt_items, 3);
+
+            if (t == "part") {
+                parts_retail_total += total;
+                if (taxable) taxable_parts_total += total;
+            } else if (t == "labor") {
+                labor_total += total;
+            } else if (t == "fee" || t == "sublet") {
+                fees_total += total;
+            } else if (t == "discount") {
+                // Discounts reduce the invoice. Stored as a positive amount
+                // here and subtracted from invoice_total below.
+                discount_total += total;
+            } else {
+                // Unknown type: treat as labor (the historical default for
+                // anything that wasn't a Part).
+                labor_total += total;
+            }
+        }
+        sqlite3_finalize(stmt_items);
+    }
+
+    // --- Tax: integer basis-points math, rounded to nearest cent. -------------
+    // tax_rate_bps is e.g. 825 for 8.25%. (taxable_parts * bps) / 10000 = cents
+    // of tax. +5000 before /10000 = round-half-up.
+    int64_t tax_liability = (taxable_parts_total * tax_rate_bps + 5000) / 10000;
+
+    // --- Shop supplies: percent of labor, clamped to [min, cap]. -------------
+    // 5% in basis points = 500. Min $2.00 = 200c, cap $25.00 = 2500c. Phase 6
+    // will make these configurable; for now they mirror the historical rates.
     int64_t shop_supplies = 0;
     if (labor_total > 0 && !supplies_removed) {
-        shop_supplies = static_cast<int64_t>(labor_total * 0.05);
-        if (shop_supplies < 200) shop_supplies = 200;
+        shop_supplies = (labor_total * 500 + 5000) / 10000;  // 5% rounded
+        if (shop_supplies < 200)  shop_supplies = 200;
         if (shop_supplies > 2500) shop_supplies = 2500;
     }
-    
-    int64_t invoice_total = parts_retail_total + labor_total + shop_supplies + tax_liability;
 
-    // Get Account IDs
-    int acct_checking = getAccountIdByName("Checking Asset");
-    int acct_parts_inv = getAccountIdByName("Parts Inventory Asset");
-    int acct_parts_inc = getAccountIdByName("Parts Income");
-    int acct_labor_inc = getAccountIdByName("Labor Income");
-    int acct_cogs = getAccountIdByName("Cost of Goods Sold Expense");
-    int acct_tax = getAccountIdByName("Sales Tax Liability");
+    int64_t invoice_total = parts_retail_total + labor_total + fees_total
+                            + shop_supplies + tax_liability - discount_total;
 
-    if (acct_checking == -1 || acct_parts_inv == -1 || acct_parts_inc == -1 ||
-        acct_labor_inc == -1 || acct_cogs == -1 || acct_tax == -1) {
+    // --- Resolve accounts. ----------------------------------------------------
+    int acct_ar         = getAccountIdByName("Accounts Receivable");
+    int acct_parts_inv  = getAccountIdByName("Parts Inventory Asset");
+    int acct_parts_inc  = getAccountIdByName("Parts Income");
+    int acct_labor_inc  = getAccountIdByName("Labor Income");
+    int acct_cogs       = getAccountIdByName("Cost of Goods Sold Expense");
+    int acct_tax        = getAccountIdByName("Sales Tax Liability");
+    int acct_deposits   = getAccountIdByName("Customer Deposits");
+
+    if (acct_ar == -1 || acct_parts_inv == -1 || acct_parts_inc == -1 ||
+        acct_labor_inc == -1 || acct_cogs == -1 || acct_tax == -1 || acct_deposits == -1) {
         std::cerr << "Required accounting accounts are missing!" << std::endl;
         return false;
     }
 
-    // Begin transaction
-    sqlite3_exec(m_db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
-
-    // Update status to 'Finalized', ticket_type to 'Invoice', and supplies_removed
-    std::string sql_upd = "UPDATE invoices SET ticket_type = 'Invoice', status = 'Finalized', supplies_removed = ? WHERE id = ?;";
-    sqlite3_stmt* stmt_upd = nullptr;
-    if (sqlite3_prepare_v2(m_db, sql_upd.c_str(), -1, &stmt_upd, nullptr) != SQLITE_OK) {
-        sqlite3_exec(m_db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    // --- Begin transaction (audit H7: check the return value). ---------------
+    if (sqlite3_exec(m_db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        std::cerr << "finalizeInvoice BEGIN failed: " << sqlite3_errmsg(m_db) << std::endl;
         return false;
     }
-    sqlite3_bind_int(stmt_upd, 1, supplies_removed ? 1 : 0);
-    sqlite3_bind_int(stmt_upd, 2, invoice_id);
-    sqlite3_step(stmt_upd);
-    sqlite3_finalize(stmt_upd);
+    TxnGuard txn(m_db);  // rolls back if we return without committing
 
-    // Create Transaction
-    std::string sql_tx = "INSERT INTO transactions (date, description) VALUES (date('now'), ?);";
-    sqlite3_stmt* stmt_tx = nullptr;
-    if (sqlite3_prepare_v2(m_db, sql_tx.c_str(), -1, &stmt_tx, nullptr) != SQLITE_OK) {
-        sqlite3_exec(m_db, "ROLLBACK;", nullptr, nullptr, nullptr);
-        return false;
-    }
-    std::string desc = "Finalized Invoice #" + std::to_string(invoice_id);
-    sqlite3_bind_text(stmt_tx, 1, desc.c_str(), -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(stmt_tx) != SQLITE_DONE) {
+    // Create the posting transaction.
+    int tx_id = -1;
+    {
+        std::string sql_tx = "INSERT INTO transactions (date, description) VALUES (date('now'), ?);";
+        sqlite3_stmt* stmt_tx = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql_tx.c_str(), -1, &stmt_tx, nullptr) != SQLITE_OK) return false;
+        std::string desc = "Finalized Invoice #" + std::to_string(invoice_id);
+        sqlite3_bind_text(stmt_tx, 1, desc.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt_tx) != SQLITE_DONE) { sqlite3_finalize(stmt_tx); return false; }
+        tx_id = static_cast<int>(sqlite3_last_insert_rowid(m_db));
         sqlite3_finalize(stmt_tx);
-        sqlite3_exec(m_db, "ROLLBACK;", nullptr, nullptr, nullptr);
-        return false;
     }
-    int tx_id = static_cast<int>(sqlite3_last_insert_rowid(m_db));
-    sqlite3_finalize(stmt_tx);
 
-    // Helper for split insert
+    // Helper for split insert.
     auto insert_split = [&](int account_id, int64_t amount) -> bool {
         std::string sql_sp = "INSERT INTO splits (transaction_id, account_id, amount) VALUES (?, ?, ?);";
         sqlite3_stmt* stmt_sp = nullptr;
@@ -759,26 +949,222 @@ bool DBManager::finalizeInvoice(int invoice_id, int64_t parts_cost_cents, double
         return ok;
     };
 
-    // Splits:
-    // 1. Checking Asset (Debit / Positive)
-    if (!insert_split(acct_checking, invoice_total)) goto rollback;
-    // 2. Parts Income (Credit / Negative)
-    if (!insert_split(acct_parts_inc, -parts_retail_total)) goto rollback;
-    // 3. Labor Income (Credit / Negative) (Includes shop supplies charges)
-    if (!insert_split(acct_labor_inc, -(labor_total + shop_supplies))) goto rollback;
-    // 4. Sales Tax Liability (Credit / Negative)
-    if (!insert_split(acct_tax, -tax_liability)) goto rollback;
-    // 5. Cost of Goods Sold Expense (Debit / Positive)
-    if (!insert_split(acct_cogs, parts_cost_cents)) goto rollback;
-    // 6. Parts Inventory Asset (Credit / Negative)
-    if (!insert_split(acct_parts_inv, -parts_cost_cents)) goto rollback;
+    // --- Post splits. ---------------------------------------------------------
+    // The invoice is owed by the customer: debit Accounts Receivable (audit C2
+    // fix — was wrongly debiting Checking Asset). Credits zero out the revenue
+    // side. Cost side (COGS / Parts Inventory) cancels arithmetically.
+    //
+    // 1. Accounts Receivable (Debit / +) — full invoice amount owed to us.
+    if (!insert_split(acct_ar, invoice_total)) return false;
+    // 2. Parts Income (Credit / -).
+    if (!insert_split(acct_parts_inc, -parts_retail_total)) return false;
+    // 3. Labor Income (Credit / -) — includes the bundled shop-supplies charge.
+    //    (Phase 6 will split supplies into its own income account.)
+    if (!insert_split(acct_labor_inc, -(labor_total + shop_supplies))) return false;
+    // 4. Sales Tax Liability (Credit / -).
+    if (!insert_split(acct_tax, -tax_liability)) return false;
+    // 5. COGS (Debit / +) and 6. Parts Inventory (Credit / -) — the cost side.
+    if (!insert_split(acct_cogs, parts_cost_cents)) return false;
+    if (!insert_split(acct_parts_inv, -parts_cost_cents)) return false;
 
-    sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
-    return true;
+    // 7+8. Prepayment consumption (audit C3 fix). If the customer prepaid, the
+    // deposit liability is extinguished and the A/R owed is reduced by the same
+    // amount.
+    //   - Debit Customer Deposits (+prepayment_cents): a debit on a liability
+    //     account reduces its balance, relieving the obligation we owed back.
+    //   - Credit Accounts Receivable (-prepayment_cents): a credit on an asset
+    //     reduces what the customer owes us, since they already paid this much.
+    // The pair still balances (debit == credit).
+    if (prepayment_cents > 0) {
+        if (!insert_split(acct_deposits, +prepayment_cents)) return false;  // relieve liability
+        if (!insert_split(acct_ar,       -prepayment_cents)) return false;  // reduce receivable
+    }
 
-rollback:
-    sqlite3_exec(m_db, "ROLLBACK;", nullptr, nullptr, nullptr);
-    return false;
+    // --- Write back status + posted_tx_id. -----------------------------------
+    // Status uses the pipeline string 'Closed' (audit: unify to pipeline
+    // strings). posted_tx_id is the idempotency + lock anchor.
+    {
+        std::string sql_upd =
+            "UPDATE invoices SET ticket_type='Invoice', status='Closed', "
+            "supplies_removed=?, posted_tx_id=? WHERE id=?;";
+        sqlite3_stmt* stmt_upd = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql_upd.c_str(), -1, &stmt_upd, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_int(stmt_upd, 1, supplies_removed ? 1 : 0);
+        sqlite3_bind_int64(stmt_upd, 2, tx_id);
+        sqlite3_bind_int(stmt_upd, 3, invoice_id);
+        if (sqlite3_step(stmt_upd) != SQLITE_DONE) { sqlite3_finalize(stmt_upd); return false; }
+        sqlite3_finalize(stmt_upd);
+    }
+
+    return txn.commit();
+}
+
+bool DBManager::voidInvoice(int invoice_id) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    // Only posted, non-voided invoices can be voided.
+    int64_t posted_tx_id = 0;
+    std::string status;
+    {
+        sqlite3_stmt* chk = nullptr;
+        std::string q = "SELECT posted_tx_id, status FROM invoices WHERE id = ?;";
+        if (sqlite3_prepare_v2(m_db, q.c_str(), -1, &chk, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_int(chk, 1, invoice_id);
+        if (sqlite3_step(chk) == SQLITE_ROW) {
+            posted_tx_id = sqlite3_column_int64(chk, 0);
+            status = safe_col_text(chk, 1);
+        }
+        sqlite3_finalize(chk);
+    }
+    if (posted_tx_id == 0) {
+        std::cerr << "voidInvoice: invoice #" << invoice_id << " is not posted" << std::endl;
+        return false;
+    }
+    if (status == "Voided") {
+        std::cerr << "voidInvoice: invoice #" << invoice_id << " is already voided" << std::endl;
+        return false;
+    }
+
+    // Load the splits of the original posting so we can mirror them.
+    std::vector<std::pair<int, int64_t>> original_splits;  // {account_id, amount}
+    {
+        sqlite3_stmt* sp = nullptr;
+        std::string q = "SELECT account_id, amount FROM splits WHERE transaction_id = ?;";
+        if (sqlite3_prepare_v2(m_db, q.c_str(), -1, &sp, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_int64(sp, 1, posted_tx_id);
+        while (sqlite3_step(sp) == SQLITE_ROW) {
+            original_splits.emplace_back(sqlite3_column_int(sp, 0),
+                                         sqlite3_column_int64(sp, 1));
+        }
+        sqlite3_finalize(sp);
+    }
+
+    if (sqlite3_exec(m_db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr) != SQLITE_OK) return false;
+    TxnGuard txn(m_db);
+
+    // Create the reversing transaction.
+    int reversal_tx_id = -1;
+    {
+        std::string sql_tx = "INSERT INTO transactions (date, description) VALUES (date('now'), ?);";
+        sqlite3_stmt* stmt_tx = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql_tx.c_str(), -1, &stmt_tx, nullptr) != SQLITE_OK) return false;
+        std::string desc = "VOID — Reversal of Invoice #" + std::to_string(invoice_id);
+        sqlite3_bind_text(stmt_tx, 1, desc.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt_tx) != SQLITE_DONE) { sqlite3_finalize(stmt_tx); return false; }
+        reversal_tx_id = static_cast<int>(sqlite3_last_insert_rowid(m_db));
+        sqlite3_finalize(stmt_tx);
+    }
+
+    // Post mirror splits (negate every amount). This zeroes the net effect on
+    // every account while leaving the original posting intact for audit.
+    for (const auto& [acct_id, amt] : original_splits) {
+        std::string sql_sp = "INSERT INTO splits (transaction_id, account_id, amount) VALUES (?, ?, ?);";
+        sqlite3_stmt* stmt_sp = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql_sp.c_str(), -1, &stmt_sp, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_int(stmt_sp, 1, reversal_tx_id);
+        sqlite3_bind_int(stmt_sp, 2, acct_id);
+        sqlite3_bind_int64(stmt_sp, 3, -amt);
+        if (sqlite3_step(stmt_sp) != SQLITE_DONE) { sqlite3_finalize(stmt_sp); return false; }
+        sqlite3_finalize(stmt_sp);
+    }
+
+    // Mark the invoice voided and clear posted_tx_id so it can be re-finalized
+    // after correction.
+    {
+        std::string sql_upd = "UPDATE invoices SET status='Voided', posted_tx_id=0 WHERE id=?;";
+        sqlite3_stmt* stmt_upd = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql_upd.c_str(), -1, &stmt_upd, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_int(stmt_upd, 1, invoice_id);
+        if (sqlite3_step(stmt_upd) != SQLITE_DONE) { sqlite3_finalize(stmt_upd); return false; }
+        sqlite3_finalize(stmt_upd);
+    }
+
+    return txn.commit();
+}
+
+bool DBManager::recordPayment(int invoice_id, int64_t amount_cents,
+                              const std::string& method, const std::string& reference) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    if (amount_cents <= 0) {
+        std::cerr << "recordPayment: amount must be positive" << std::endl;
+        return false;
+    }
+
+    // Determine whether this is a post-finalize payment (debit Cash / credit A/R)
+    // or a pre-finalize deposit (debit Cash / credit Customer Deposits + bump
+    // prepayment_cents).
+    int64_t posted_tx_id = 0;
+    {
+        sqlite3_stmt* chk = nullptr;
+        std::string q = "SELECT posted_tx_id FROM invoices WHERE id = ?;";
+        if (sqlite3_prepare_v2(m_db, q.c_str(), -1, &chk, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_int(chk, 1, invoice_id);
+        if (sqlite3_step(chk) == SQLITE_ROW) {
+            posted_tx_id = sqlite3_column_int64(chk, 0);
+        }
+        sqlite3_finalize(chk);
+    }
+
+    int acct_checking = getAccountIdByName("Checking Asset");
+    int acct_ar       = getAccountIdByName("Accounts Receivable");
+    int acct_deposits = getAccountIdByName("Customer Deposits");
+    if (acct_checking == -1 || acct_ar == -1 || acct_deposits == -1) {
+        std::cerr << "recordPayment: required accounts missing" << std::endl;
+        return false;
+    }
+
+    if (sqlite3_exec(m_db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr) != SQLITE_OK) return false;
+    TxnGuard txn(m_db);
+
+    int tx_id = -1;
+    {
+        std::string sql_tx = "INSERT INTO transactions (date, description) VALUES (date('now'), ?);";
+        sqlite3_stmt* stmt_tx = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql_tx.c_str(), -1, &stmt_tx, nullptr) != SQLITE_OK) return false;
+        std::string desc = "Payment — Invoice #" + std::to_string(invoice_id);
+        if (!method.empty())    desc += " (" + method;
+        if (!reference.empty()) desc += " " + reference;
+        if (!method.empty())    desc += ")";
+        sqlite3_bind_text(stmt_tx, 1, desc.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt_tx) != SQLITE_DONE) { sqlite3_finalize(stmt_tx); return false; }
+        tx_id = static_cast<int>(sqlite3_last_insert_rowid(m_db));
+        sqlite3_finalize(stmt_tx);
+    }
+
+    auto insert_split = [&](int account_id, int64_t amount) -> bool {
+        std::string sql_sp = "INSERT INTO splits (transaction_id, account_id, amount) VALUES (?, ?, ?);";
+        sqlite3_stmt* stmt_sp = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql_sp.c_str(), -1, &stmt_sp, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_int(stmt_sp, 1, tx_id);
+        sqlite3_bind_int(stmt_sp, 2, account_id);
+        sqlite3_bind_int64(stmt_sp, 3, amount);
+        bool ok = (sqlite3_step(stmt_sp) == SQLITE_DONE);
+        sqlite3_finalize(stmt_sp);
+        return ok;
+    };
+
+    // Money in: always debit Checking.
+    if (!insert_split(acct_checking, amount_cents)) return false;
+
+    if (posted_tx_id != 0) {
+        // Posted invoice: credit A/R (the customer owes less now).
+        if (!insert_split(acct_ar, -amount_cents)) return false;
+    } else {
+        // Pre-finalize deposit: credit Customer Deposits (a liability we owe
+        // back if the work is never done) and bump prepayment_cents so the UI
+        // shows the deposit against the eventual balance.
+        if (!insert_split(acct_deposits, -amount_cents)) return false;
+        std::string sql_bump = "UPDATE invoices SET prepayment_cents = prepayment_cents + ? WHERE id = ?;";
+        sqlite3_stmt* stmt_bump = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql_bump.c_str(), -1, &stmt_bump, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_int64(stmt_bump, 1, amount_cents);
+        sqlite3_bind_int(stmt_bump, 2, invoice_id);
+        if (sqlite3_step(stmt_bump) != SQLITE_DONE) { sqlite3_finalize(stmt_bump); return false; }
+        sqlite3_finalize(stmt_bump);
+    }
+
+    return txn.commit();
 }
 
 std::vector<Account> DBManager::getAccounts() {
@@ -1124,8 +1510,9 @@ std::vector<Customer> DBManager::searchCustomers(const std::string& field, const
     std::string col = "last_name";
     if (field == "first_name") col = "first_name";
     else if (field == "phone_number") col = "phone_number";
+    else if (field == "email") col = "email";
 
-    std::string sql = "SELECT id, last_name, first_name, middle_name, address, city, phone_number FROM customers WHERE " + col + " LIKE ?;";
+    std::string sql = "SELECT id, last_name, first_name, middle_name, address, city, phone_number, email, preferred_contact, notes FROM customers WHERE " + col + " LIKE ?;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return list;
 
@@ -1135,16 +1522,15 @@ std::vector<Customer> DBManager::searchCustomers(const std::string& field, const
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         Customer c;
         c.id = sqlite3_column_int(stmt, 0);
-        c.last_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        c.first_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-        const char* mid = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-        c.middle_name = mid ? mid : "";
-        const char* addr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
-        c.address = addr ? addr : "";
-        const char* city = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
-        c.city = city ? city : "";
-        const char* phone = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
-        c.phone_number = phone ? phone : "";
+        c.last_name = safe_col_text(stmt, 1);
+        c.first_name = safe_col_text(stmt, 2);
+        c.middle_name = safe_col_text(stmt, 3);
+        c.address = safe_col_text(stmt, 4);
+        c.city = safe_col_text(stmt, 5);
+        c.phone_number = safe_col_text(stmt, 6);
+        c.email = safe_col_text(stmt, 7);
+        c.preferred_contact = safe_col_text(stmt, 8);
+        c.notes = safe_col_text(stmt, 9);
         list.push_back(c);
     }
     sqlite3_finalize(stmt);
@@ -1540,6 +1926,165 @@ std::string DBManager::getCarEngineSpecs(const std::string& make, const std::str
         sqlite3_finalize(stmt);
     }
     return specs;
+}
+
+bool DBManager::updateInvoiceNotes(int id, const std::string& internal_notes, const std::string& customer_notes, const std::string& tech_notes, const std::string& vehicle_notes, const std::string& auth_notes) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    std::string sql = "UPDATE invoices SET internal_notes = ?, customer_notes = ?, tech_notes = ?, vehicle_notes = ?, auth_notes = ? WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+
+    sqlite3_bind_text(stmt, 1, internal_notes.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, customer_notes.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, tech_notes.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, vehicle_notes.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, auth_notes.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 6, id);
+
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool DBManager::updateInvoiceSignature(int id, const std::string& signature_data) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    std::string sql = "UPDATE invoices SET signature_data = ? WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+
+    sqlite3_bind_text(stmt, 1, signature_data.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, id);
+
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool DBManager::updateInvoicePrepayment(int id, int64_t prepayment_cents) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    std::string sql = "UPDATE invoices SET prepayment_cents = ? WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+
+    sqlite3_bind_int64(stmt, 1, prepayment_cents);
+    sqlite3_bind_int(stmt, 2, id);
+
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+std::vector<Vehicle> DBManager::getCustomerVehicles(int customer_id) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    std::vector<Vehicle> list;
+    std::string sql = "SELECT id, customer_id, license_plate, vin, year, model, engine_specs, trim, transmission, color FROM vehicles WHERE customer_id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int(stmt, 1, customer_id);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            Vehicle v;
+            v.id = sqlite3_column_int(stmt, 0);
+            v.customer_id = sqlite3_column_int(stmt, 1);
+            v.license_plate = safe_col_text(stmt, 2);
+            v.vin = safe_col_text(stmt, 3);
+            v.year = sqlite3_column_int(stmt, 4);
+            v.model = safe_col_text(stmt, 5);
+            v.engine_specs = safe_col_text(stmt, 6);
+            v.trim = safe_col_text(stmt, 7);
+            v.transmission = safe_col_text(stmt, 8);
+            v.color = safe_col_text(stmt, 9);
+            list.push_back(v);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return list;
+}
+
+bool DBManager::addStatusHistoryEntry(int invoice_id, const std::string& status, const std::string& user_name) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    std::string sql = "INSERT INTO invoice_status_history (invoice_id, status, timestamp, user_name) VALUES (?, ?, datetime('now', 'localtime'), ?);";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+
+    sqlite3_bind_int(stmt, 1, invoice_id);
+    sqlite3_bind_text(stmt, 2, status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, user_name.c_str(), -1, SQLITE_TRANSIENT);
+
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+std::vector<StatusHistoryEntry> DBManager::getStatusHistory(int invoice_id) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    std::vector<StatusHistoryEntry> list;
+    std::string sql = "SELECT id, invoice_id, status, timestamp, user_name FROM invoice_status_history WHERE invoice_id = ? ORDER BY id ASC;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int(stmt, 1, invoice_id);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            StatusHistoryEntry h;
+            h.id = sqlite3_column_int(stmt, 0);
+            h.invoice_id = sqlite3_column_int(stmt, 1);
+            h.status = safe_col_text(stmt, 2);
+            h.timestamp = safe_col_text(stmt, 3);
+            h.user_name = safe_col_text(stmt, 4);
+            list.push_back(h);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return list;
+}
+
+bool DBManager::addAttachment(const Attachment& attachment) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    std::string sql = "INSERT INTO attachments (invoice_id, file_path, file_name, upload_time, is_internal, line_item_id) VALUES (?, ?, ?, datetime('now', 'localtime'), ?, ?);";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+
+    sqlite3_bind_int(stmt, 1, attachment.invoice_id);
+    sqlite3_bind_text(stmt, 2, attachment.file_path.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, attachment.file_name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, attachment.is_internal ? 1 : 0);
+    sqlite3_bind_int(stmt, 5, attachment.line_item_id);
+
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+std::vector<Attachment> DBManager::getAttachments(int invoice_id) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    std::vector<Attachment> list;
+    std::string sql = "SELECT id, invoice_id, file_path, file_name, upload_time, is_internal, line_item_id FROM attachments WHERE invoice_id = ? ORDER BY id DESC;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int(stmt, 1, invoice_id);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            Attachment a;
+            a.id = sqlite3_column_int(stmt, 0);
+            a.invoice_id = sqlite3_column_int(stmt, 1);
+            a.file_path = safe_col_text(stmt, 2);
+            a.file_name = safe_col_text(stmt, 3);
+            a.upload_time = safe_col_text(stmt, 4);
+            a.is_internal = sqlite3_column_int(stmt, 5) != 0;
+            a.line_item_id = sqlite3_column_int(stmt, 6);
+            list.push_back(a);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return list;
+}
+
+bool DBManager::deleteAttachment(int id) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    std::string sql = "DELETE FROM attachments WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_int(stmt, 1, id);
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
 }
 
 } // namespace tuxrepair
