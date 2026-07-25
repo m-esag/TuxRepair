@@ -84,6 +84,8 @@ private:
     QPushButton* m_btn_new_ro;
     QPushButton* m_btn_save_ro;
     QPushButton* m_btn_print_ro;
+    QPushButton* m_btn_notes_popup;
+    QPushButton* m_btn_wip_list;
     QPushButton* m_btn_send_est;
     QPushButton* m_btn_approve_est;
     QPushButton* m_btn_convert_inv;
@@ -182,6 +184,9 @@ private:
     QSpinBox* m_nav_invoice_spin;
 
     // Bottom summary labels
+    QLabel* m_summary_discount_lbl;
+    QLabel* m_summary_sublet_lbl;
+    QLabel* m_summary_disposal_lbl;
     QLabel* m_summary_parts_lbl;
     QLabel* m_summary_labor_lbl;
     QLabel* m_summary_supplies_lbl;

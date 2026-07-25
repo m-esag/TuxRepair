@@ -2,6 +2,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QHeaderView>
 #include <QMessageBox>
 #include <QPainter>
@@ -27,7 +28,7 @@ CustomerLookupDialog::CustomerLookupDialog(std::shared_ptr<DBManager> db, QWidge
     search_layout->addWidget(m_search_edit);
 
     m_field_combo = new QComboBox(this);
-    m_field_combo->addItems({"Last Name", "First Name", "Phone"});
+    m_field_combo->addItems({"License Plate", "Last Name", "First Name", "Phone"});
     search_layout->addWidget(m_field_combo);
 
     auto search_btn = new QPushButton("Search", this);
@@ -50,6 +51,8 @@ CustomerLookupDialog::CustomerLookupDialog(std::shared_ptr<DBManager> db, QWidge
     btn_layout->addWidget(m_select_btn);
     layout->addLayout(btn_layout);
 
+    connect(m_search_edit, &QLineEdit::textChanged, this, &CustomerLookupDialog::onSearch);
+    connect(m_field_combo, &QComboBox::currentIndexChanged, this, &CustomerLookupDialog::onSearch);
     connect(search_btn, &QPushButton::clicked, this, &CustomerLookupDialog::onSearch);
     connect(m_select_btn, &QPushButton::clicked, this, &CustomerLookupDialog::onSelect);
     connect(cancel_btn, &QPushButton::clicked, this, &QDialog::reject);
@@ -59,52 +62,170 @@ CustomerLookupDialog::CustomerLookupDialog(std::shared_ptr<DBManager> db, QWidge
     onSearch();
 }
 
+void CustomerLookupDialog::setInitialSearchField(const QString& field_name) {
+    if (field_name == "License") {
+        m_field_combo->setCurrentText("License Plate");
+    } else if (field_name == "First Name") {
+        m_field_combo->setCurrentText("First Name");
+    } else if (field_name == "Phone") {
+        m_field_combo->setCurrentText("Phone");
+    } else {
+        m_field_combo->setCurrentText("Last Name");
+    }
+    m_search_edit->setFocus();
+}
+
+struct CustomerResultRow {
+    Customer customer;
+    Vehicle vehicle;
+    bool has_vehicle = false;
+};
+
 void CustomerLookupDialog::onSearch() {
     std::string text = m_search_edit->text().trimmed().toStdString();
-    std::string field = "last_name";
-    if (m_field_combo->currentIndex() == 1) field = "first_name";
-    else if (m_field_combo->currentIndex() == 2) field = "phone_number";
+    int mode = m_field_combo->currentIndex(); // 0: License Plate, 1: Last Name, 2: First Name, 3: Phone
 
-    auto customers = m_db->searchCustomers(field, text);
-    m_results_table->setRowCount(0);
+    std::vector<CustomerResultRow> rows;
 
-    for (const auto& c : customers) {
-        // Query vehicles for this customer
-        auto vehicles = m_db->searchVehiclesByPlate("%");
+    if (mode == 0) { // License Plate
+        auto vehicles = m_db->searchVehiclesByPlate(text.empty() ? "%" : text);
         for (const auto& v : vehicles) {
-            if (v.customer_id != c.id) continue;
-
-            int row = m_results_table->rowCount();
-            m_results_table->insertRow(row);
-
-            auto name_item = new QTableWidgetItem(QString("%1, %2").arg(QString::fromStdString(c.last_name)).arg(QString::fromStdString(c.first_name)));
-            // Save IDs
-            name_item->setData(Qt::UserRole, c.id);
-            name_item->setData(Qt::UserRole + 1, v.id);
-
-            m_results_table->setItem(row, 0, name_item);
-            m_results_table->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(c.phone_number)));
-            m_results_table->setItem(row, 2, new QTableWidgetItem(QString::fromStdString(v.license_plate)));
-            m_results_table->setItem(row, 3, new QTableWidgetItem(QString("%1 %2").arg(v.year).arg(QString::fromStdString(v.model))));
-            m_results_table->setItem(row, 4, new QTableWidgetItem(QString::fromStdString(v.engine_specs)));
+            Customer c;
+            m_db->getCustomer(v.customer_id, c);
+            CustomerResultRow r;
+            r.customer = c;
+            r.vehicle = v;
+            r.has_vehicle = true;
+            rows.push_back(r);
         }
+        std::sort(rows.begin(), rows.end(), [](const CustomerResultRow& a, const CustomerResultRow& b) {
+            return a.vehicle.license_plate < b.vehicle.license_plate;
+        });
+    } else {
+        std::string db_field = "last_name";
+        if (mode == 2) db_field = "first_name";
+        else if (mode == 3) db_field = "phone_number";
+
+        auto customers = m_db->searchCustomers(db_field, text);
+        auto all_vehicles = m_db->searchVehiclesByPlate("%");
+
+        for (const auto& c : customers) {
+            std::vector<Vehicle> matched_vehs;
+            for (const auto& v : all_vehicles) {
+                if (v.customer_id == c.id) matched_vehs.push_back(v);
+            }
+            if (matched_vehs.empty()) {
+                CustomerResultRow r;
+                r.customer = c;
+                r.has_vehicle = false;
+                rows.push_back(r);
+            } else {
+                for (const auto& v : matched_vehs) {
+                    CustomerResultRow r;
+                    r.customer = c;
+                    r.vehicle = v;
+                    r.has_vehicle = true;
+                    rows.push_back(r);
+                }
+            }
+        }
+
+        if (mode == 1) { // Last Name
+            std::sort(rows.begin(), rows.end(), [](const CustomerResultRow& a, const CustomerResultRow& b) {
+                if (a.customer.last_name != b.customer.last_name) return a.customer.last_name < b.customer.last_name;
+                return a.customer.first_name < b.customer.first_name;
+            });
+        } else if (mode == 2) { // First Name
+            std::sort(rows.begin(), rows.end(), [](const CustomerResultRow& a, const CustomerResultRow& b) {
+                if (a.customer.first_name != b.customer.first_name) return a.customer.first_name < b.customer.first_name;
+                return a.customer.last_name < b.customer.last_name;
+            });
+        } else if (mode == 3) { // Phone (Focus on Last 4 Digits)
+            auto get_last4 = [](const std::string& p) -> std::string {
+                std::string digits;
+                for (char ch : p) {
+                    if (std::isdigit(static_cast<unsigned char>(ch))) digits += ch;
+                }
+                return digits.size() >= 4 ? digits.substr(digits.size() - 4) : digits;
+            };
+            std::sort(rows.begin(), rows.end(), [get_last4](const CustomerResultRow& a, const CustomerResultRow& b) {
+                std::string last4_a = get_last4(a.customer.phone_number);
+                std::string last4_b = get_last4(b.customer.phone_number);
+                if (last4_a != last4_b) return last4_a < last4_b;
+                return a.customer.phone_number < b.customer.phone_number;
+            });
+        }
+    }
+
+    m_results_table->setRowCount(0);
+    for (const auto& r : rows) {
+        int row = m_results_table->rowCount();
+        m_results_table->insertRow(row);
+
+        auto name_item = new QTableWidgetItem(QString("%1, %2")
+                                                  .arg(QString::fromStdString(r.customer.last_name))
+                                                  .arg(QString::fromStdString(r.customer.first_name)));
+        auto phone_item = new QTableWidgetItem(QString::fromStdString(r.customer.phone_number));
+        QTableWidgetItem* plate_item = nullptr;
+        QTableWidgetItem* model_item = nullptr;
+        QTableWidgetItem* engine_item = nullptr;
+
+        if (r.has_vehicle) {
+            plate_item = new QTableWidgetItem(QString::fromStdString(r.vehicle.license_plate));
+            model_item = new QTableWidgetItem(QString("%1 %2").arg(r.vehicle.year).arg(QString::fromStdString(r.vehicle.model)));
+            engine_item = new QTableWidgetItem(QString::fromStdString(r.vehicle.engine_specs));
+        } else {
+            plate_item = new QTableWidgetItem("N/A");
+            model_item = new QTableWidgetItem("New Customer Record");
+            engine_item = new QTableWidgetItem("N/A");
+        }
+
+        int c_id = r.customer.id;
+        int v_id = r.has_vehicle ? r.vehicle.id : -1;
+
+        for (auto* item : {name_item, phone_item, plate_item, model_item, engine_item}) {
+            item->setData(Qt::UserRole, c_id);
+            item->setData(Qt::UserRole + 1, v_id);
+        }
+
+        m_results_table->setItem(row, 0, name_item);
+        m_results_table->setItem(row, 1, phone_item);
+        m_results_table->setItem(row, 2, plate_item);
+        m_results_table->setItem(row, 3, model_item);
+        m_results_table->setItem(row, 4, engine_item);
     }
 }
 
 void CustomerLookupDialog::onSelect() {
-    auto ranges = m_results_table->selectedRanges();
-    if (ranges.isEmpty()) {
-        QMessageBox::warning(this, "No Selection", "Please select a customer row from the results table.");
+    int row = m_results_table->currentRow();
+    if (row < 0 || row >= m_results_table->rowCount()) {
+        auto ranges = m_results_table->selectedRanges();
+        if (ranges.isEmpty()) {
+            QMessageBox::warning(this, "No Selection", "Please select a customer row from the results table.");
+            return;
+        }
+        row = ranges.first().topRow();
+    }
+
+    auto name_item = m_results_table->item(row, 0);
+    if (!name_item) {
+        QMessageBox::warning(this, "Selection Error", "Invalid table row selected.");
         return;
     }
 
-    int row = ranges.first().topRow();
-    auto name_item = m_results_table->item(row, 0);
     int cust_id = name_item->data(Qt::UserRole).toInt();
     int veh_id = name_item->data(Qt::UserRole + 1).toInt();
 
+    m_selected_customer = Customer{};
+    m_selected_vehicle = Vehicle{};
+
     m_db->getCustomer(cust_id, m_selected_customer);
-    m_db->getVehicle(veh_id, m_selected_vehicle);
+    if (veh_id != -1) {
+        m_db->getVehicle(veh_id, m_selected_vehicle);
+    } else {
+        m_selected_vehicle.id = -1;
+        m_selected_vehicle.customer_id = cust_id;
+    }
     m_has_selection = true;
 
     accept();
@@ -139,8 +260,8 @@ CatalogLookupDialog::CatalogLookupDialog(std::shared_ptr<DBManager> db, QWidget*
     layout->addLayout(filter_layout);
 
     m_catalog_table = new QTableWidget(this);
-    m_catalog_table->setColumnCount(4);
-    m_catalog_table->setHorizontalHeaderLabels({"Type", "SKU / Code", "Description", "Unit Retail Price"});
+    m_catalog_table->setColumnCount(5);
+    m_catalog_table->setHorizontalHeaderLabels({"Type", "SKU / Code", "Description", "QOH", "Unit Retail Price"});
     m_catalog_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     m_catalog_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_catalog_table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -181,8 +302,18 @@ void CatalogLookupDialog::onSearch() {
             m_catalog_table->setItem(row, 1, new QTableWidgetItem(code));
             m_catalog_table->setItem(row, 2, new QTableWidgetItem(desc));
             
+            auto qoh_item = new QTableWidgetItem(QString::number(item.quantity_on_hand, 'f', 0));
+            if (item.quantity_on_hand <= 0) {
+                qoh_item->setBackground(QBrush(QColor("#ffcdd2"))); // Red warning
+                qoh_item->setText(qoh_item->text() + " (OUT OF STOCK)");
+            } else if (item.quantity_on_hand <= item.reorder_point) {
+                qoh_item->setBackground(QBrush(QColor("#fff9c4"))); // Yellow warning
+                qoh_item->setText(qoh_item->text() + " (LOW STOCK)");
+            }
+            m_catalog_table->setItem(row, 3, qoh_item);
+
             double d_price = item.retail_price / 100.0;
-            m_catalog_table->setItem(row, 3, new QTableWidgetItem(QString::number(d_price, 'f', 2)));
+            m_catalog_table->setItem(row, 4, new QTableWidgetItem(QString::number(d_price, 'f', 2)));
         }
     }
 
@@ -210,9 +341,75 @@ void CatalogLookupDialog::onSearch() {
             m_catalog_table->setItem(row, 0, new QTableWidgetItem("Labor"));
             m_catalog_table->setItem(row, 1, new QTableWidgetItem(l.code));
             m_catalog_table->setItem(row, 2, new QTableWidgetItem(l.desc));
-            m_catalog_table->setItem(row, 3, new QTableWidgetItem(QString::number(l.price, 'f', 2)));
+            m_catalog_table->setItem(row, 3, new QTableWidgetItem("N/A"));
+            m_catalog_table->setItem(row, 4, new QTableWidgetItem(QString::number(l.price, 'f', 2)));
         }
     }
+}
+
+// ==========================================
+// QUICK PAYMENT & FINALIZATION DIALOG
+// ==========================================
+QuickPaymentDialog::QuickPaymentDialog(int invoice_id, double amount_due, std::shared_ptr<DBManager> db, QWidget* parent)
+    : QDialog(parent), m_db(db), m_invoice_id(invoice_id), m_amount_due(amount_due) {
+    setWindowTitle(QString("Process Payment - Work Order #%1").arg(invoice_id));
+    resize(420, 280);
+
+    auto layout = new QVBoxLayout(this);
+
+    auto due_lbl = new QLabel(QString("Total Amount Due: $%1").arg(QString::number(amount_due, 'f', 2)), this);
+    due_lbl->setStyleSheet("font-weight: bold; font-size: 16px; color: #2e7d32; padding: 4px;");
+    layout->addWidget(due_lbl);
+
+    auto grid = new QGridLayout();
+    grid->addWidget(new QLabel("Payment Method:", this), 0, 0);
+    m_method_combo = new QComboBox(this);
+    m_method_combo->addItems({"Cash", "Credit Card", "Debit Card", "Check", "Split Payment"});
+    grid->addWidget(m_method_combo, 0, 1);
+
+    grid->addWidget(new QLabel("Amount Tended / Paid ($):", this), 1, 0);
+    m_amount_edit = new QLineEdit(this);
+    m_amount_edit->setText(QString::number(amount_due, 'f', 2));
+    grid->addWidget(m_amount_edit, 1, 1);
+
+    m_change_lbl = new QLabel("Change Due: $0.00", this);
+    m_change_lbl->setStyleSheet("font-weight: bold; font-size: 13px; color: blue;");
+    grid->addWidget(m_change_lbl, 2, 1);
+
+    layout->addLayout(grid);
+
+    auto update_change = [this]() {
+        double paid = m_amount_edit->text().toDouble();
+        double change = paid - m_amount_due;
+        if (change < 0.0) change = 0.0;
+        m_change_lbl->setText(QString("Change Due: $%1").arg(QString::number(change, 'f', 2)));
+    };
+
+    connect(m_amount_edit, &QLineEdit::textChanged, this, update_change);
+
+    auto btn_layout = new QHBoxLayout();
+    auto pay_btn = new QPushButton("💳 Finalize & Pay (F12)", this);
+    pay_btn->setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; padding: 8px; font-size: 13px;");
+    auto cancel_btn = new QPushButton("Cancel", this);
+
+    btn_layout->addWidget(cancel_btn);
+    btn_layout->addWidget(pay_btn);
+    layout->addLayout(btn_layout);
+
+    connect(pay_btn, &QPushButton::clicked, this, &QuickPaymentDialog::onProcessPayment);
+    connect(cancel_btn, &QPushButton::clicked, this, &QDialog::reject);
+}
+
+void QuickPaymentDialog::onProcessPayment() {
+    m_payment_method = m_method_combo->currentText().toStdString();
+    m_amount_paid = m_amount_edit->text().toDouble();
+
+    if (m_amount_paid < m_amount_due && m_payment_method != "Split Payment") {
+        QMessageBox::warning(this, "Insufficient Payment", "Payment amount tendering is less than the total amount due.");
+        return;
+    }
+
+    accept();
 }
 
 void CatalogLookupDialog::onSelect() {
@@ -223,7 +420,7 @@ void CatalogLookupDialog::onSelect() {
     m_selected_type = m_catalog_table->item(row, 0)->text();
     m_selected_code = m_catalog_table->item(row, 1)->text();
     m_selected_desc = m_catalog_table->item(row, 2)->text();
-    m_selected_price = m_catalog_table->item(row, 3)->text().toDouble();
+    m_selected_price = m_catalog_table->item(row, 4)->text().toDouble();
     m_has_selection = true;
 
     accept();
@@ -630,6 +827,102 @@ void SignaturePadDialog::onAccept() {
     buffer.open(QIODevice::WriteOnly);
     image.save(&buffer, "PNG");
     m_sig_base64 = QString::fromLatin1(ba.toBase64());
+
+    accept();
+}
+
+// ==========================================
+// NEW INTAKE WIZARD DIALOG
+// ==========================================
+NewIntakeWizardDialog::NewIntakeWizardDialog(std::shared_ptr<DBManager> db, QWidget* parent)
+    : QDialog(parent), m_db(db) {
+    setWindowTitle("🆕 Customer & Vehicle Intake Wizard");
+    resize(500, 420);
+
+    auto main_layout = new QVBoxLayout(this);
+
+    auto header_lbl = new QLabel("Enter Customer & Vehicle details for instant intake:", this);
+    header_lbl->setStyleSheet("font-weight: bold; font-size: 13px; color: #1976d2;");
+    main_layout->addWidget(header_lbl);
+
+    auto cust_box = new QGroupBox("Customer Information", this);
+    auto cust_form = new QFormLayout(cust_box);
+    m_first_name_edit = new QLineEdit(this);
+    m_last_name_edit = new QLineEdit(this);
+    m_phone_edit = new QLineEdit(this);
+    m_email_edit = new QLineEdit(this);
+
+    cust_form->addRow("First Name *:", m_first_name_edit);
+    cust_form->addRow("Last Name *:", m_last_name_edit);
+    cust_form->addRow("Phone Number:", m_phone_edit);
+    cust_form->addRow("Email Address:", m_email_edit);
+    main_layout->addWidget(cust_box);
+
+    auto veh_box = new QGroupBox("Vehicle Information", this);
+    auto veh_form = new QFormLayout(veh_box);
+    m_plate_edit = new QLineEdit(this);
+    m_year_edit = new QLineEdit(this);
+    m_model_edit = new QLineEdit(this);
+    m_engine_edit = new QLineEdit(this);
+    m_mileage_edit = new QLineEdit(this);
+
+    m_year_edit->setText("2022");
+
+    veh_form->addRow("License Plate *:", m_plate_edit);
+    veh_form->addRow("Year:", m_year_edit);
+    veh_form->addRow("Model / Trim:", m_model_edit);
+    veh_form->addRow("Engine Specs:", m_engine_edit);
+    veh_form->addRow("Odometer In:", m_mileage_edit);
+    main_layout->addWidget(veh_box);
+
+    auto btn_box = new QHBoxLayout();
+    auto cancel_btn = new QPushButton("Cancel", this);
+    auto complete_btn = new QPushButton("🚀 Create Work Order", this);
+    complete_btn->setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; padding: 8px 16px;");
+
+    btn_box->addStretch();
+    btn_box->addWidget(cancel_btn);
+    btn_box->addWidget(complete_btn);
+    main_layout->addLayout(btn_box);
+
+    connect(cancel_btn, &QPushButton::clicked, this, &QDialog::reject);
+    connect(complete_btn, &QPushButton::clicked, this, &NewIntakeWizardDialog::onCompleteIntake);
+}
+
+void NewIntakeWizardDialog::onCompleteIntake() {
+    std::string first = m_first_name_edit->text().trimmed().toStdString();
+    std::string last = m_last_name_edit->text().trimmed().toStdString();
+    std::string plate = m_plate_edit->text().trimmed().toStdString();
+
+    if (first.empty() || last.empty() || plate.empty()) {
+        QMessageBox::warning(this, "Missing Fields", "Please provide First Name, Last Name, and License Plate to complete intake.");
+        return;
+    }
+
+    Customer c;
+    c.first_name = first;
+    c.last_name = last;
+    c.phone_number = m_phone_edit->text().trimmed().toStdString();
+    c.email = m_email_edit->text().trimmed().toStdString();
+
+    m_created_customer_id = m_db->insertCustomer(c);
+    if (m_created_customer_id == -1) {
+        QMessageBox::critical(this, "Database Error", "Failed to save customer to database.");
+        return;
+    }
+
+    Vehicle v;
+    v.customer_id = m_created_customer_id;
+    v.license_plate = plate;
+    v.year = m_year_edit->text().toInt();
+    v.model = m_model_edit->text().trimmed().toStdString();
+    v.engine_specs = m_engine_edit->text().trimmed().toStdString();
+
+    m_created_vehicle_id = m_db->insertVehicle(v);
+    if (m_created_vehicle_id == -1) {
+        QMessageBox::critical(this, "Database Error", "Failed to save vehicle to database.");
+        return;
+    }
 
     accept();
 }

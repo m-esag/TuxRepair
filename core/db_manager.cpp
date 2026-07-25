@@ -1516,7 +1516,7 @@ std::vector<Customer> DBManager::searchCustomers(const std::string& field, const
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return list;
 
-    std::string wild = value + "%";
+    std::string wild = (col == "phone_number") ? ("%" + value + "%") : (value + "%");
     sqlite3_bind_text(stmt, 1, wild.c_str(), -1, SQLITE_TRANSIENT);
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {

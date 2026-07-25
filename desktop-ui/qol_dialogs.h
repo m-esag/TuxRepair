@@ -23,6 +23,7 @@ public:
     bool hasSelection() const { return m_has_selection; }
     Customer selectedCustomer() const { return m_selected_customer; }
     Vehicle selectedVehicle() const { return m_selected_vehicle; }
+    void setInitialSearchField(const QString& field_name);
 
 private slots:
     void onSearch();
@@ -70,6 +71,30 @@ private:
     QRadioButton* m_radio_labor;
     QTableWidget* m_catalog_table;
     QPushButton* m_select_btn;
+};
+
+// --- Quick Payment & Finalization Dialog ---
+class QuickPaymentDialog : public QDialog {
+    Q_OBJECT
+public:
+    explicit QuickPaymentDialog(int invoice_id, double amount_due, std::shared_ptr<DBManager> db, QWidget* parent = nullptr);
+
+    std::string paymentMethod() const { return m_payment_method; }
+    double amountPaid() const { return m_amount_paid; }
+
+private slots:
+    void onProcessPayment();
+
+private:
+    std::shared_ptr<DBManager> m_db;
+    int m_invoice_id;
+    double m_amount_due;
+    std::string m_payment_method = "Cash";
+    double m_amount_paid = 0.0;
+
+    QComboBox* m_method_combo;
+    QLineEdit* m_amount_edit;
+    QLabel* m_change_lbl;
 };
 
 // --- Service History Dialog ---
@@ -155,6 +180,35 @@ private:
     QComboBox* m_model_combo;
     QLineEdit* m_plate_edit;
     QLineEdit* m_engine_edit;
+};
+
+// --- New Intake Wizard Dialog ---
+class NewIntakeWizardDialog : public QDialog {
+    Q_OBJECT
+public:
+    explicit NewIntakeWizardDialog(std::shared_ptr<DBManager> db, QWidget* parent = nullptr);
+
+    int customerId() const { return m_created_customer_id; }
+    int vehicleId() const { return m_created_vehicle_id; }
+
+private slots:
+    void onCompleteIntake();
+
+private:
+    std::shared_ptr<DBManager> m_db;
+    int m_created_customer_id = -1;
+    int m_created_vehicle_id = -1;
+
+    QLineEdit* m_first_name_edit;
+    QLineEdit* m_last_name_edit;
+    QLineEdit* m_phone_edit;
+    QLineEdit* m_email_edit;
+
+    QLineEdit* m_plate_edit;
+    QLineEdit* m_year_edit;
+    QLineEdit* m_model_edit;
+    QLineEdit* m_engine_edit;
+    QLineEdit* m_mileage_edit;
 };
 
 } // namespace tuxrepair
